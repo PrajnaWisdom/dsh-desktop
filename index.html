@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DSH Desktop</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="app-header">
+        <div class="brand">
+          <div class="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 48 48" width="34" height="34">
+              <path
+                d="M14 12 L26 24 L14 36"
+                fill="none"
+                stroke="#22d3ee"
+                stroke-width="5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <rect x="30" y="19" width="9" height="10" rx="2.5" fill="#22d3ee" />
+            </svg>
+          </div>
+          <div>
+            <h1>DSH Desktop</h1>
+            <p class="subtitle">DeepSeek Harness 桌面客户端</p>
+          </div>
+        </div>
+        <span id="version" class="version-badge">v0.1.0</span>
+      </header>
+
+      <main>
+        <section class="card status-card">
+          <h2>服务器状态</h2>
+          <div class="status-row">
+            <span id="status-dot" class="status-dot checking"></span>
+            <div class="status-info">
+              <span id="status-text" class="status-text">检测中…</span>
+              <span id="status-url" class="status-url"></span>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button id="btn-open" class="btn primary" disabled>打开 DSH（嵌入窗口）</button>
+            <button id="btn-browser" class="btn">在浏览器中打开</button>
+            <button id="btn-retry" class="btn ghost">重新检测</button>
+          </div>
+          <label class="check-row">
+            <input id="auto-open" type="checkbox" checked />
+            <span>在线时自动嵌入 DSH Web GUI</span>
+          </label>
+        </section>
+
+        <section class="card settings-card">
+          <h2>连接设置</h2>
+          <div class="field-row">
+            <label class="field">
+              <span>主机</span>
+              <input id="host" type="text" placeholder="127.0.0.1" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span>端口</span>
+              <input id="port" type="number" min="1" max="65535" placeholder="3080" />
+            </label>
+            <button id="btn-save" class="btn">保存设置</button>
+          </div>
+          <label class="check-row">
+            <input id="autostart" type="checkbox" />
+            <span>开机自启动</span>
+          </label>
+          <p class="hint">
+            默认连接 DSH Web GUI：<code>http://127.0.0.1:3080</code>。修改端口后点击保存，状态将自动重新检测。
+          </p>
+        </section>
+
+        <section class="card about-card">
+          <h2>使用提示</h2>
+          <ul>
+            <li>关闭窗口会最小化到<strong>系统托盘</strong>，右键托盘图标可打开 / 返回控制台 / 退出。</li>
+            <li>点击托盘图标可显示或隐藏主窗口。</li>
+            <li>「返回控制台」可随时从嵌入的 DSH 页面回到本设置页。</li>
+          </ul>
+        </section>
+      </main>
+
+      <footer>
+        <span>DSH Desktop · Tauri 2 · 内嵌 DSH Web GUI</span>
+      </footer>
+    </div>
+
+    <div id="banner" class="banner hidden"></div>
+    <div id="toast" class="toast hidden"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

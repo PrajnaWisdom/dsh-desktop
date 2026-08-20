@@ -1,0 +1,21 @@
+# 依赖
+node_modules/
+
+# 前端构建产物
+dist/
+
+# Rust 构建产物
+src-tauri/target/
+
+# Tauri 生成的 schema
+src-tauri/gen/schemas/
+
+# 本地工具链（沙箱环境内安装的 rustup/cargo/npm 缓存）
+.toolchains/
+
+# 杂项
+*.log
+.DS_Store
+Thumbs.db
+src-tauri/icons/android
+src-tauri/icons/ios

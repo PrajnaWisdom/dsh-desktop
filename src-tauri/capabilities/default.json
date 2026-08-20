@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "DSH Desktop 主窗口默认权限",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "autostart:default"
+  ]
+}
