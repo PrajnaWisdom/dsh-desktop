@@ -10,6 +10,9 @@ src-tauri/target/
 # Tauri 生成的 schema
 src-tauri/gen/schemas/
 
+# 内置 DSH 资源（CI 构建时临时生成，体积大不入库）
+src-tauri/resources/
+
 # 本地工具链（沙箱环境内安装的 rustup/cargo/npm 缓存）
 .toolchains/
 

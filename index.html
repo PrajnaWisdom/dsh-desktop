@@ -28,7 +28,7 @@
             <p class="subtitle">DeepSeek Harness 桌面客户端</p>
           </div>
         </div>
-        <span id="version" class="version-badge">v0.1.0</span>
+        <span id="version" class="version-badge">v0.2.0</span>
       </header>
 
       <main>
@@ -71,6 +71,30 @@
           </label>
           <p class="hint">
             默认连接 DSH Web GUI：<code>http://127.0.0.1:3080</code>。修改端口后点击保存，状态将自动重新检测。
+          </p>
+        </section>
+
+        <section class="card server-card">
+          <h2>内置 DSH 服务</h2>
+          <div class="status-row">
+            <span id="bundle-dot" class="status-dot checking"></span>
+            <div class="status-info">
+              <span id="bundle-text" class="status-text">检测中…</span>
+              <span id="bundle-meta" class="status-url"></span>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button id="btn-start" class="btn primary">启动内置服务</button>
+            <button id="btn-stop" class="btn">停止内置服务</button>
+            <button id="btn-log" class="btn ghost">打开服务器日志</button>
+          </div>
+          <label class="check-row">
+            <input id="auto-start-server" type="checkbox" checked />
+            <span>应用启动时自动启动内置 DSH（端口已被占用时自动跳过）</span>
+          </label>
+          <p class="hint">
+            数据目录：<code id="bundle-home"></code><br />
+            首次启动约需 5–15 秒完成自举（自动建立插件链接、初始化 profile）。
           </p>
         </section>
 

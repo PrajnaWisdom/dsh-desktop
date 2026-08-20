@@ -6,6 +6,12 @@ on:
     tags:
       - "v*"
 
+env:
+  # 捆绑的内置 DSH 版本（npm 包 @deepseek-ai/dsh）
+  DSH_VERSION: "0.1.0-rc.7"
+  # 捆绑的 Node.js 运行时版本（win-x64）
+  NODE_VERSION: "22.21.1"
+
 jobs:
   build:
     runs-on: windows-latest
@@ -13,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js (build tooling)
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -22,10 +28,32 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Download Node.js runtime (bundled into installer)
+        shell: pwsh
+        run: |
+          $ver = "${{ env.NODE_VERSION }}"
+          $url = "https://nodejs.org/dist/v$ver/node-v$ver-win-x64.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile node.zip
+          Expand-Archive node.zip -DestinationPath node-x64
+          New-Item -ItemType Directory -Force -Path src-tauri/resources/node | Out-Null
+          Copy-Item "node-x64/node-v$ver-win-x64/node.exe" "src-tauri/resources/node/node.exe"
+          Get-Item "src-tauri/resources/node/node.exe" | Select-Object Name, Length
+
+      - name: Install DSH package (bundled, Windows natives)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/resources/dsh | Out-Null
+          Set-Content -Path src-tauri/resources/dsh/package.json -Value '{"name":"dsh-bundled","private":true}'
+          Push-Location src-tauri/resources/dsh
+          npm install --no-audit --no-fund "@deepseek-ai/dsh@${{ env.DSH_VERSION }}"
+          Pop-Location
+          Get-Item "src-tauri/resources/dsh/node_modules/@deepseek-ai/dsh/package.json" | Select-Object FullName
+
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and bundle (Tauri)
+      - name: Build and bundle (Tauri, embeds Node + DSH)
         run: npm run tauri build
 
       - name: Upload artifacts
@@ -34,4 +62,3 @@ jobs:
           name: dsh-desktop-windows
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi

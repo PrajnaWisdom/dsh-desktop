@@ -36,6 +36,9 @@ if ($LASTEXITCODE -ne 0) { throw "tauri build 失败" }
 
 Write-Host "`n============================================================" -ForegroundColor Green
 Write-Host " 构建完成！安装包位于:" -ForegroundColor Green
-Write-Host "   NSIS: src-tauri\target\release\bundle\nsis\DSH Desktop_0.1.0_x64-setup.exe"
-Write-Host "   MSI : src-tauri\target\release\bundle\msi\DSH Desktop_0.1.0_x64_en-US.msi"
+Write-Host "   NSIS: src-tauri\target\release\bundle\nsis\DSH Desktop_0.2.0_x64-setup.exe"
 Write-Host "============================================================" -ForegroundColor Green
+Write-Host ""
+Write-Host " 提示：本脚本构建的是【外置壳版本】（不含 dsh 本体）。" -ForegroundColor Yellow
+Write-Host " 完整内置版（含 Node + dsh）请推送 v* 标签触发 GitHub Actions 构建，" -ForegroundColor Yellow
+Write-Host " 或参考 README.md 的「构建安装包」一节。" -ForegroundColor Yellow

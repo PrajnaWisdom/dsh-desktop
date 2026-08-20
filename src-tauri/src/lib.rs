@@ -2,13 +2,15 @@
 //!
 //! 核心能力：
 //! - 主窗口内嵌 DSH Web GUI（默认 http://127.0.0.1:3080），离线时显示本地控制台页
+//! - 完整内置 DSH：安装包自带 Node 运行时与 @deepseek-ai/dsh 包，应用可自动拉起服务
 //! - 系统托盘：显示在线状态、打开 DSH、返回控制台、开机自启动开关、退出
 //! - 每 5 秒 TCP 探活，向主窗口推送 `dsh-status` 事件
 //! - 窗口状态记忆（tauri-plugin-window-state）、单实例（tauri-plugin-single-instance）
 //! - 关闭窗口时隐藏到托盘，开机自启动时以 --hidden 参数启动
 
+mod server;
+
 use std::{
-    net::{SocketAddr, TcpStream},
     path::PathBuf,
     sync::Mutex,
     thread,
@@ -19,10 +21,16 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Url, WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, Url, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_opener::OpenerExt;
+
+use crate::server::ManagedServer;
+
+fn default_true() -> bool {
+    true
+}
 
 /// 服务器连接设置（持久化到 app_config_dir/settings.json）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +38,9 @@ use tauri_plugin_opener::OpenerExt;
 struct Settings {
     host: String,
     port: u16,
+    /// 应用启动时自动启动内置 DSH 服务
+    #[serde(default = "default_true")]
+    auto_start_server: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +48,7 @@ impl Default for Settings {
         Self {
             host: "127.0.0.1".into(),
             port: 3080,
+            auto_start_server: true,
         }
     }
 }
@@ -56,6 +68,9 @@ struct TrayState {
     status_item: MenuItem<tauri::Wry>,
     autostart_item: CheckMenuItem<tauri::Wry>,
 }
+
+/// 内置 DSH 服务器句柄
+struct ServerState(Mutex<ManagedServer>);
 
 // ---------- 设置读写 ----------
 
@@ -89,15 +104,6 @@ fn server_url(s: &Settings) -> String {
     format!("http://{}:{}", s.host, s.port)
 }
 
-/// TCP 探活：只验证端口是否可连，不引入任何 HTTP 依赖
-fn ping(host: &str, port: u16) -> bool {
-    let addr: SocketAddr = match format!("{host}:{port}").parse() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(800)).is_ok()
-}
-
 // ---------- 前端命令 ----------
 
 #[tauri::command]
@@ -112,7 +118,7 @@ fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
 
 #[tauri::command]
 fn check_server(host: String, port: u16) -> bool {
-    ping(&host, port)
+    ManagedServer::ping(&host, port)
 }
 
 #[tauri::command]
@@ -163,6 +169,37 @@ fn open_in_browser(app: AppHandle) -> Result<(), String> {
     let url = server_url(&settings);
     app.opener()
         .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+// ---------- 内置 DSH 服务命令 ----------
+
+#[tauri::command]
+fn ensure_server(app: AppHandle, host: String, port: u16) -> Result<bool, String> {
+    let state = app.state::<ServerState>();
+    let mut server = state.0.lock().unwrap();
+    server.ensure_started(&app, &host, port)
+}
+
+#[tauri::command]
+fn stop_server(app: AppHandle) {
+    let state = app.state::<ServerState>();
+    let mut server = state.0.lock().unwrap();
+    server.stop();
+}
+
+#[tauri::command]
+fn get_server_info(app: AppHandle) -> server::ServerInfo {
+    let state = app.state::<ServerState>();
+    let server = state.0.lock().unwrap();
+    server.info(&app)
+}
+
+#[tauri::command]
+fn open_server_log(app: AppHandle) -> Result<(), String> {
+    let path = ManagedServer::log_path(&app)?;
+    app.opener()
+        .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
 }
 
@@ -261,7 +298,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 fn sync_tray(app: AppHandle) {
     if let Some(state) = app.try_state::<TrayState>() {
         let settings = load_settings(&app);
-        let online = ping(&settings.host, settings.port);
+        let online = ManagedServer::ping(&settings.host, settings.port);
         let text = if online { "状态：在线" } else { "状态：离线" };
         let _ = state.status_item.set_text(text);
         let enabled = app.autolaunch().is_enabled().unwrap_or(false);
@@ -309,10 +346,15 @@ pub fn run() {
             set_home_url,
             open_server,
             open_home,
-            open_in_browser
+            open_in_browser,
+            ensure_server,
+            stop_server,
+            get_server_info,
+            open_server_log
         ])
         .setup(|app| {
             app.manage(HomeUrl(Mutex::new(None)));
+            app.manage(ServerState(Mutex::new(ManagedServer::new())));
 
             // 开机自启动（--hidden）时不显示主窗口
             if std::env::args().any(|a| a == "--hidden") {
@@ -335,11 +377,35 @@ pub fn run() {
 
             setup_tray(app.handle())?;
 
+            // 自动启动内置 DSH 服务（默认开启；端口已被占用则直接复用）
+            let settings = load_settings(app.handle());
+            let host = settings.host.clone();
+            let port = settings.port;
+            if settings.auto_start_server {
+                let app = app.handle().clone();
+                thread::spawn(move || {
+                    let state = app.state::<ServerState>();
+                    let mut server = state.0.lock().unwrap();
+                    // 只拉起进程（毫秒级），等待端口就绪由探活线程负责
+                    let _ = server.spawn_server(&app, &host, port);
+                });
+            }
+
             let handle = app.handle().clone();
             thread::spawn(move || poll_loop(handle));
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("DSH Desktop 启动失败");
+        .build(tauri::generate_context!())
+        .expect("DSH Desktop 构建失败")
+        .run(|app, event| {
+            // 应用退出时终止内置 DSH 进程树
+            if let RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<ServerState>() {
+                    if let Ok(mut server) = state.0.lock() {
+                        server.stop();
+                    }
+                }
+            }
+        });
 }
