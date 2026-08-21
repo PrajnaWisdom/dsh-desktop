@@ -9,7 +9,7 @@
 // stream sources (apiProxy.events.mux/host) and the carrier registry so both
 // the stdio protocol loop (main.js) and the in-process self-test can use it.
 
-import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 export const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -38,12 +38,43 @@ export function serverRequest(frame) {
 }
 
 /**
+ * Ensure the home's flat `@deepseek-ai` scope is junctioned to the real DSH
+ * installation BEFORE any `@deepseek-ai/*` import runs. The sidecar is copied
+ * into `$DSH_HOME/profiles/node_modules/@dsh-desktop/sidecar`, so its
+ * `import('@deepseek-ai/...')` resolves from the home's flat node_modules —
+ * which must already point at the installation. Uses a Node junction (no
+ * admin), the same mechanism as dsh-app-boot's own ensureSymlink.
+ *
+ * When the anchor already lives inside the home (dev junction / prior heal)
+ * there is nothing to do; when it points at the bundled resource
+ * (`<resource>/dsh/node_modules/@deepseek-ai/dsh/package.json`), the scope is
+ * linked so the sidecar's own imports resolve, and every in-box plugin then
+ * resolves its transitive imports from its real directory under the resource.
+ */
+function ensureScopeJunction() {
+  const flat = join(DSH_HOME, 'profiles', 'node_modules');
+  if (INSTALL_ANCHOR.startsWith(flat)) return;
+  const scopeLink = join(flat, '@deepseek-ai');
+  const scopeTarget = dirname(dirname(INSTALL_ANCHOR));
+  try {
+    mkdirSync(dirname(scopeLink), { recursive: true });
+    symlinkSync(scopeTarget, scopeLink, 'junction');
+  } catch (error) {
+    if (error?.code !== 'EEXIST') log('scope junction warning:', error?.message ?? error);
+  }
+}
+
+/**
  * Boot the web profile and wire the /api handler, stream sources and the
  * client bridge (route + index taps) into the carrier.
  * @returns settled handles for the protocol loop / self-test.
  */
 export async function bootSidecar() {
   const started = Date.now();
+
+  // Link the installation scope into the home first: the dynamic imports below
+  // (and everything the profile loads) resolve `@deepseek-ai/*` from it.
+  ensureScopeJunction();
 
   const [
     { boot, loadProfile, healProfilesModuleFallback, composeEntries, loadLayeredEnv },

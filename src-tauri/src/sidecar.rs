@@ -314,12 +314,9 @@ impl Sidecar {
         };
         let main = sidecar_dir.join("main.js");
         let home = Self::dsh_home(app)?;
-        let anchor = home
-            .join("profiles")
-            .join("node_modules")
-            .join("@deepseek-ai")
-            .join("dsh")
-            .join("package.json");
+        let Some(anchor) = Self::dsh_anchor(app) else {
+            return fail("未找到内置 DSH（resources/dsh 或 home 内的 @deepseek-ai/dsh 缺失）");
+        };
         let err_log = log.try_clone().map_err(|e| e.to_string())?;
 
         let mut cmd = Command::new(&node);
@@ -371,6 +368,32 @@ impl Sidecar {
         let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
         let sibling = exe_dir.join("node").join("node.exe");
         sibling.is_file().then_some(sibling)
+    }
+
+    /// DSH 安装锚点（`@deepseek-ai/dsh/package.json`）：
+    /// 优先捆绑资源 `<resource>/dsh/node_modules/@deepseek-ai/dsh/package.json`；
+    /// 开发模式（无捆绑资源）回退到 DSH_HOME 内的锚点（由手动 junction 提供）。
+    /// sidecar 据此建立 home 的 `@deepseek-ai` scope junction（见 boot.js）。
+    fn dsh_anchor(app: &AppHandle) -> Option<PathBuf> {
+        if let Ok(res) = app.path().resource_dir() {
+            let bundled = strip_verbatim_prefix(&res)
+                .join("dsh")
+                .join("node_modules")
+                .join("@deepseek-ai")
+                .join("dsh")
+                .join("package.json");
+            if bundled.is_file() {
+                return Some(bundled);
+            }
+        }
+        let home = Self::dsh_home(app).ok()?;
+        let anchor = home
+            .join("profiles")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("package.json");
+        anchor.is_file().then_some(anchor)
     }
 
     /// 读线程：解析 sidecar stdout，投递 response / 转发 frame / 跟踪状态。
