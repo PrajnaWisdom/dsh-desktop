@@ -28,73 +28,47 @@
             <p class="subtitle">DeepSeek Harness 桌面客户端</p>
           </div>
         </div>
-        <span id="version" class="version-badge">v0.2.0</span>
+        <span id="version" class="version-badge">v0.3.0</span>
       </header>
 
       <main>
         <section class="card status-card">
-          <h2>服务器状态</h2>
+          <h2>内置 DSH 状态</h2>
           <div class="status-row">
             <span id="status-dot" class="status-dot checking"></span>
             <div class="status-info">
               <span id="status-text" class="status-text">检测中…</span>
-              <span id="status-url" class="status-url"></span>
+              <span id="status-meta" class="status-url"></span>
             </div>
           </div>
           <div class="btn-row">
             <button id="btn-open" class="btn primary" disabled>打开 DSH（嵌入窗口）</button>
-            <button id="btn-browser" class="btn">在浏览器中打开</button>
             <button id="btn-retry" class="btn ghost">重新检测</button>
           </div>
           <label class="check-row">
             <input id="auto-open" type="checkbox" checked />
-            <span>在线时自动嵌入 DSH Web GUI</span>
+            <span>就绪后自动嵌入 DSH Web GUI</span>
           </label>
         </section>
 
-        <section class="card settings-card">
-          <h2>连接设置</h2>
-          <div class="field-row">
-            <label class="field">
-              <span>主机</span>
-              <input id="host" type="text" placeholder="127.0.0.1" spellcheck="false" />
-            </label>
-            <label class="field">
-              <span>端口</span>
-              <input id="port" type="number" min="1" max="65535" placeholder="3080" />
-            </label>
-            <button id="btn-save" class="btn">保存设置</button>
-          </div>
+        <section class="card server-card">
+          <h2>启动设置</h2>
+          <label class="check-row">
+            <input id="auto-start-server" type="checkbox" checked />
+            <span>应用启动时自动启动内置 DSH</span>
+          </label>
           <label class="check-row">
             <input id="autostart" type="checkbox" />
             <span>开机自启动</span>
           </label>
-          <p class="hint">
-            默认连接 DSH Web GUI：<code>http://127.0.0.1:3080</code>。修改端口后点击保存，状态将自动重新检测。
-          </p>
-        </section>
-
-        <section class="card server-card">
-          <h2>内置 DSH 服务</h2>
-          <div class="status-row">
-            <span id="bundle-dot" class="status-dot checking"></span>
-            <div class="status-info">
-              <span id="bundle-text" class="status-text">检测中…</span>
-              <span id="bundle-meta" class="status-url"></span>
-            </div>
-          </div>
           <div class="btn-row">
-            <button id="btn-start" class="btn primary">启动内置服务</button>
-            <button id="btn-stop" class="btn">停止内置服务</button>
-            <button id="btn-log" class="btn ghost">打开服务器日志</button>
+            <button id="btn-start" class="btn primary">启动内置 DSH</button>
+            <button id="btn-stop" class="btn">停止内置 DSH</button>
+            <button id="btn-log" class="btn ghost">打开运行日志</button>
           </div>
-          <label class="check-row">
-            <input id="auto-start-server" type="checkbox" checked />
-            <span>应用启动时自动启动内置 DSH（端口已被占用时自动跳过）</span>
-          </label>
           <p class="hint">
             数据目录：<code id="bundle-home"></code><br />
-            首次启动约需 5–15 秒完成自举（自动建立插件链接、初始化 profile）。
+            首次启动约需 5–15 秒完成自举（加载 profile、初始化插件）。运行期间不占用任何端口。
           </p>
         </section>
 
@@ -109,7 +83,7 @@
       </main>
 
       <footer>
-        <span>DSH Desktop · Tauri 2 · 内嵌 DSH Web GUI</span>
+        <span>DSH Desktop · Tauri 2 · 内嵌 DSH Web GUI（无端口模式）</span>
       </footer>
     </div>
 

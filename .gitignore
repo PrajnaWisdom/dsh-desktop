@@ -10,8 +10,9 @@ src-tauri/target/
 # Tauri 生成的 schema
 src-tauri/gen/schemas/
 
-# 内置 DSH 资源（CI 构建时临时生成，体积大不入库）
-src-tauri/resources/
+# 内置 DSH 资源与 node 运行时（CI 构建时填充，体积大不入库；README 占位文件已入库）
+src-tauri/resources/dsh/
+src-tauri/resources/node/
 
 # 本地工具链（沙箱环境内安装的 rustup/cargo/npm 缓存）
 .toolchains/
@@ -22,3 +23,7 @@ src-tauri/resources/
 Thumbs.db
 src-tauri/icons/android
 src-tauri/icons/ios
+
+# Route C 本地测试与缓存
+.test-home/
+.npm-cache/

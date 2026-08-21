@@ -4,7 +4,7 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 interface StatusPayload {
   online: boolean;
-  url: string;
+  ready: boolean;
 }
 
 interface Settings {
@@ -13,17 +13,18 @@ interface Settings {
   auto_start_server: boolean;
 }
 
-interface ServerInfo {
-  bundled: boolean;
+interface SidecarInfo {
   node_path: string | null;
-  dsh_path: string | null;
+  sidecar_path: string | null;
   dsh_home: string | null;
   log_path: string | null;
   dsh_version: string | null;
 }
 
-const DEFAULT_HOST = "127.0.0.1";
-const DEFAULT_PORT = 3080;
+/** 内嵌 DSH 页面（自定义协议；Windows 上 origin 为 http://dsh.localhost）。
+ *  用根路径（SPA 入口），不要带 /index.html——dsh-web-app 的 fallback 只对
+ *  无扩展名的 SPA 路由返回 index。 */
+const EMBED_URL = "http://dsh.localhost/";
 const NAVIGATED_KEY = "dsh-desktop.navigated";
 const AUTO_OPEN_KEY = "dsh-desktop.auto-open";
 
@@ -34,38 +35,26 @@ const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) 
 
 const statusDot = $<HTMLSpanElement>("status-dot");
 const statusText = $<HTMLSpanElement>("status-text");
-const statusUrl = $<HTMLSpanElement>("status-url");
-const hostInput = $<HTMLInputElement>("host");
-const portInput = $<HTMLInputElement>("port");
+const statusMeta = $<HTMLSpanElement>("status-meta");
 const autoOpenInput = $<HTMLInputElement>("auto-open");
 const autostartInput = $<HTMLInputElement>("autostart");
+const autoStartServerInput = $<HTMLInputElement>("auto-start-server");
 const btnOpen = $<HTMLButtonElement>("btn-open");
-const btnBrowser = $<HTMLButtonElement>("btn-browser");
 const btnRetry = $<HTMLButtonElement>("btn-retry");
-const btnSave = $<HTMLButtonElement>("btn-save");
-
-const bundleDot = $<HTMLSpanElement>("bundle-dot");
-const bundleText = $<HTMLSpanElement>("bundle-text");
-const bundleMeta = $<HTMLSpanElement>("bundle-meta");
-const bundleHome = $<HTMLElement>("bundle-home");
 const btnStart = $<HTMLButtonElement>("btn-start");
 const btnStop = $<HTMLButtonElement>("btn-stop");
 const btnLog = $<HTMLButtonElement>("btn-log");
-const autoStartServerInput = $<HTMLInputElement>("auto-start-server");
 
+const bundleHome = $<HTMLElement>("bundle-home");
 const banner = $<HTMLDivElement>("banner");
 const toast = $<HTMLDivElement>("toast");
 
 // ---- 状态 ----
-let settings: Settings = { host: DEFAULT_HOST, port: DEFAULT_PORT, auto_start_server: true };
+let settings: Settings = { host: "127.0.0.1", port: 3080, auto_start_server: true };
 let autoOpen = localStorage.getItem(AUTO_OPEN_KEY) !== "0";
 let navigated = sessionStorage.getItem(NAVIGATED_KEY) === "1";
-let statusOnline: boolean | null = null;
-let serverInfo: ServerInfo | null = null;
-
-function serverUrl(s: Settings): string {
-  return `http://${s.host}:${s.port}`;
-}
+let ready: boolean | null = null;
+let sidecarInfo: SidecarInfo | null = null;
 
 // ---- UI 辅助 ----
 let toastTimer = 0;
@@ -78,40 +67,37 @@ function showToast(message: string, kind: "ok" | "err" = "ok"): void {
   }, 2600);
 }
 
-function setStatus(online: boolean | null, url?: string): void {
-  statusOnline = online;
-  statusDot.className = `status-dot ${online === null ? "checking" : online ? "online" : "offline"}`;
-  statusText.textContent = online === null ? "检测中…" : online ? "在线" : "离线";
-  if (url) statusUrl.textContent = url;
-  btnOpen.disabled = online !== true;
-  btnBrowser.disabled = online !== true;
-}
-
-function setBundleState(kind: "checking" | "online" | "offline", text: string, meta?: string): void {
-  bundleDot.className = `status-dot ${kind}`;
-  bundleText.textContent = text;
-  if (meta) bundleMeta.textContent = meta;
+function setStatus(readyState: boolean | null, meta?: string): void {
+  ready = readyState;
+  statusDot.className =
+    `status-dot ${readyState === null ? "checking" : readyState ? "online" : "offline"}`;
+  statusText.textContent =
+    readyState === null ? "检测中…" : readyState ? "就绪" : "未运行";
+  if (meta) statusMeta.textContent = meta;
+  btnOpen.disabled = readyState !== true;
 }
 
 // ---- 业务逻辑 ----
-async function refresh(): Promise<void> {
-  setStatus(null);
-  try {
-    const ok = await invoke<boolean>("check_server", {
-      host: settings.host,
-      port: settings.port,
-    });
-    setStatus(ok, serverUrl(settings));
-  } catch (err) {
-    setStatus(false, serverUrl(settings));
-    showToast(String(err), "err");
-  }
-}
-
 function embed(): void {
   navigated = true;
   sessionStorage.setItem(NAVIGATED_KEY, "1");
-  window.location.href = serverUrl(settings);
+  window.location.href = EMBED_URL;
+}
+
+async function refresh(): Promise<void> {
+  setStatus(null);
+  try {
+    const status = await invoke<StatusPayload>("sidecar_status");
+    const meta = status.ready && sidecarInfo?.dsh_version
+      ? `内置 @deepseek-ai/dsh v${sidecarInfo.dsh_version}`
+      : status.online
+        ? "启动中…"
+        : undefined;
+    setStatus(status.ready, meta);
+  } catch (err) {
+    setStatus(false);
+    showToast(String(err), "err");
+  }
 }
 
 async function loadSettings(): Promise<void> {
@@ -119,15 +105,13 @@ async function loadSettings(): Promise<void> {
   try {
     const s = await invoke<Settings>("get_settings");
     settings = {
-      host: s.host?.trim() || DEFAULT_HOST,
-      port: typeof s.port === "number" && s.port > 0 ? s.port : DEFAULT_PORT,
+      host: s.host?.trim() || "127.0.0.1",
+      port: typeof s.port === "number" && s.port > 0 ? s.port : 3080,
       auto_start_server: s.auto_start_server !== false,
     };
   } catch {
     // 使用默认值
   }
-  hostInput.value = settings.host;
-  portInput.value = String(settings.port);
   autoStartServerInput.checked = settings.auto_start_server;
 }
 
@@ -140,90 +124,55 @@ async function loadAutostart(): Promise<void> {
   }
 }
 
-async function loadServerInfo(): Promise<void> {
+async function loadSidecarInfo(): Promise<void> {
   if (!inTauri) return;
   try {
-    serverInfo = await invoke<ServerInfo>("get_server_info");
+    sidecarInfo = await invoke<SidecarInfo>("get_sidecar_info");
   } catch {
-    serverInfo = null;
+    sidecarInfo = null;
   }
-  if (!serverInfo || !serverInfo.bundled) {
-    setBundleState(
-      "offline",
-      "未打包内置资源",
-      "当前为外置模式：请在连接设置中指向已运行的 DSH 服务",
-    );
-    btnStart.disabled = true;
-    btnStop.disabled = true;
-    btnLog.disabled = true;
-    return;
-  }
-  bundleHome.textContent = serverInfo.dsh_home ?? "";
-  const meta = serverInfo.dsh_version
-    ? `捆绑 @deepseek-ai/dsh v${serverInfo.dsh_version} · Node: ${serverInfo.node_path ?? "?"}`
-    : "内置资源已就绪";
-  setBundleState("online", "内置资源已就绪", meta);
+  bundleHome.textContent = sidecarInfo?.dsh_home ?? "";
   btnStart.disabled = false;
   btnStop.disabled = false;
   btnLog.disabled = false;
 }
 
 async function onStatus(payload: StatusPayload): Promise<void> {
-  setStatus(payload.online, payload.url);
-  if (payload.online && autoOpen && !navigated) {
+  const meta = payload.ready && sidecarInfo?.dsh_version
+    ? `内置 @deepseek-ai/dsh v${sidecarInfo.dsh_version}`
+    : payload.online
+      ? "启动中…"
+      : undefined;
+  setStatus(payload.ready, meta);
+  if (payload.ready && autoOpen && !navigated) {
     embed();
   }
 }
 
 // ---- 事件绑定 ----
 btnOpen.addEventListener("click", () => {
-  if (statusOnline === true) embed();
-});
-
-btnBrowser.addEventListener("click", () => {
-  invoke("open_in_browser").catch((err) => showToast(String(err), "err"));
+  if (ready === true) embed();
 });
 
 btnRetry.addEventListener("click", () => {
   void refresh();
 });
 
-btnSave.addEventListener("click", () => {
-  const rawPort = portInput.value.trim();
-  const port = Number(rawPort);
-  if (!rawPort || Number.isNaN(port) || port < 1 || port > 65535) {
-    showToast("端口无效，请输入 1-65535 之间的数字", "err");
-    return;
-  }
-  settings = { host: hostInput.value.trim() || DEFAULT_HOST, port, auto_start_server: settings.auto_start_server };
-  if (!inTauri) {
-    showToast("浏览器预览模式：设置仅保存在本地");
-    void refresh();
-    return;
-  }
-  invoke("save_settings", { settings })
-    .then(() => {
-      showToast("设置已保存");
-      void refresh();
-    })
-    .catch((err) => showToast(String(err), "err"));
-});
-
 btnStart.addEventListener("click", () => {
   btnStart.disabled = true;
-  setBundleState("checking", "正在启动内置 DSH…", "首次启动需 5–15 秒，请稍候");
-  invoke<boolean>("ensure_server", { host: settings.host, port: settings.port })
+  setStatus(null, "正在启动内置 DSH…首次启动约需 5–15 秒");
+  invoke<boolean>("ensure_sidecar")
     .then((ok) => {
       if (ok) {
         showToast("内置 DSH 已就绪");
         void refresh();
       } else {
-        setBundleState("offline", "启动失败或超时", "请查看服务器日志");
+        setStatus(false);
         showToast("内置 DSH 未就绪", "err");
       }
     })
     .catch((err) => {
-      setBundleState("offline", "启动失败", String(err));
+      setStatus(false, String(err));
       showToast(String(err), "err");
     })
     .finally(() => {
@@ -232,17 +181,16 @@ btnStart.addEventListener("click", () => {
 });
 
 btnStop.addEventListener("click", () => {
-  invoke("stop_server")
+  invoke("stop_sidecar")
     .then(() => {
-      showToast("已停止内置 DSH 服务");
-      setBundleState("offline", "已停止", serverInfo?.dsh_home ?? undefined);
-      void refresh();
+      showToast("已停止内置 DSH");
+      setStatus(false, sidecarInfo?.dsh_home ?? undefined);
     })
     .catch((err) => showToast(String(err), "err"));
 });
 
 btnLog.addEventListener("click", () => {
-  invoke("open_server_log").catch((err) => showToast(String(err), "err"));
+  invoke("open_sidecar_log").catch((err) => showToast(String(err), "err"));
 });
 
 autoStartServerInput.addEventListener("change", () => {
@@ -279,16 +227,17 @@ async function init(): Promise<void> {
     banner.textContent =
       "提示：当前不在 Tauri 窗口中运行（浏览器预览模式），部分功能不可用。请使用 npm run tauri dev 启动桌面应用。";
     banner.classList.remove("hidden");
-    btnSave.disabled = true;
-    btnBrowser.disabled = true;
     btnOpen.disabled = true;
+    btnStart.disabled = true;
+    btnStop.disabled = true;
+    btnLog.disabled = true;
     return;
   }
 
   // 上报本地首页地址，供托盘「返回控制台」使用
   invoke("set_home_url", { url: window.location.href }).catch(() => {});
 
-  await Promise.all([loadSettings(), loadAutostart(), loadServerInfo()]);
+  await Promise.all([loadSettings(), loadAutostart(), loadSidecarInfo()]);
   listen<StatusPayload>("dsh-status", (event) => {
     void onStatus(event.payload);
   }).catch(() => {});

@@ -1,21 +1,22 @@
 //! DSH Desktop — 内嵌 DSH Web GUI 的 Windows 桌面客户端（Tauri 2）
 //!
+//! Route C：无 HTTP/端口层。内置 DSH 以 node sidecar 运行，
+//! 前端经 `dsh` 自定义协议（Windows origin 为 http://dsh.localhost）加载，
+//! /api 调用走 Tauri 命令 → sidecar stdin/stdout JSON-lines，
+//! 下行流走 Tauri 事件（dsh-frame / dsh-stream-end）。
+//!
 //! 核心能力：
-//! - 主窗口内嵌 DSH Web GUI（默认 http://127.0.0.1:3080），离线时显示本地控制台页
-//! - 完整内置 DSH：安装包自带 Node 运行时与 @deepseek-ai/dsh 包，应用可自动拉起服务
-//! - 系统托盘：显示在线状态、打开 DSH、返回控制台、开机自启动开关、退出
-//! - 每 5 秒 TCP 探活，向主窗口推送 `dsh-status` 事件
+//! - 主窗口内嵌 DSH Web GUI（自定义协议，无端口），离线时显示本地控制台页
+//! - 完整内置 DSH：安装包自带 Node 运行时与 @deepseek-ai/dsh 包，应用自动拉起 sidecar
+//! - 系统托盘：显示状态、打开 DSH、返回控制台、开机自启动开关、退出
+//! - 每 5 秒轮询 sidecar 状态，向主窗口推送 `dsh-status` 事件
 //! - 窗口状态记忆（tauri-plugin-window-state）、单实例（tauri-plugin-single-instance）
 //! - 关闭窗口时隐藏到托盘，开机自启动时以 --hidden 参数启动
 
-mod server;
+mod bridge;
+mod sidecar;
 
-use std::{
-    path::PathBuf,
-    sync::Mutex,
-    thread,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Mutex, thread, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -26,19 +27,20 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::server::ManagedServer;
+use crate::bridge::EMBED_URL;
+use crate::sidecar::Sidecar;
 
 fn default_true() -> bool {
     true
 }
 
-/// 服务器连接设置（持久化到 app_config_dir/settings.json）
+/// 连接设置（host/port 仅作历史兼容与展示，Route C 不再使用端口）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     host: String,
     port: u16,
-    /// 应用启动时自动启动内置 DSH 服务
+    /// 应用启动时自动启动内置 DSH sidecar
     #[serde(default = "default_true")]
     auto_start_server: bool,
 }
@@ -53,11 +55,11 @@ impl Default for Settings {
     }
 }
 
-/// 推送给前端的服务器状态
+/// 推送给前端的 sidecar 状态
 #[derive(Debug, Clone, Serialize)]
 struct StatusPayload {
     online: bool,
-    url: String,
+    ready: bool,
 }
 
 /// 本地控制台首页地址（由前端在启动时上报，供托盘「返回控制台」使用）
@@ -68,9 +70,6 @@ struct TrayState {
     status_item: MenuItem<tauri::Wry>,
     autostart_item: CheckMenuItem<tauri::Wry>,
 }
-
-/// 内置 DSH 服务器句柄
-struct ServerState(Mutex<ManagedServer>);
 
 // ---------- 设置读写 ----------
 
@@ -100,10 +99,6 @@ fn save_settings_file(app: &AppHandle, s: &Settings) -> Result<(), String> {
     std::fs::write(path, json).map_err(|e| format!("写入设置失败: {e}"))
 }
 
-fn server_url(s: &Settings) -> String {
-    format!("http://{}:{}", s.host, s.port)
-}
-
 // ---------- 前端命令 ----------
 
 #[tauri::command]
@@ -114,11 +109,6 @@ fn get_settings(app: AppHandle) -> Settings {
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     save_settings_file(&app, &settings)
-}
-
-#[tauri::command]
-fn check_server(host: String, port: u16) -> bool {
-    ManagedServer::ping(&host, port)
 }
 
 #[tauri::command]
@@ -138,7 +128,7 @@ fn home_url(app: &AppHandle) -> String {
             }
         }
     }
-    // 兜底：不同平台上本地页面的默认地址
+    // 兜底：控制台页（Tauri 自带资源协议）
     if cfg!(target_os = "windows") {
         "tauri://localhost".into()
     } else {
@@ -152,10 +142,17 @@ fn navigate_main(app: &AppHandle, url: &str) -> Result<(), String> {
     window.navigate(parsed).map_err(|e| e.to_string())
 }
 
+/// 打开内置 DSH（等 sidecar 就绪后导航到自定义协议页面）
 #[tauri::command]
-fn open_server(app: AppHandle) -> Result<(), String> {
-    let settings = load_settings(&app);
-    navigate_main(&app, &server_url(&settings))
+async fn open_server(app: AppHandle) -> Result<(), String> {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        app2.state::<Sidecar>().ensure_started(&app2)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    navigate_main(&app, EMBED_URL)
 }
 
 #[tauri::command]
@@ -163,41 +160,37 @@ fn open_home(app: AppHandle) -> Result<(), String> {
     navigate_main(&app, &home_url(&app))
 }
 
-#[tauri::command]
-fn open_in_browser(app: AppHandle) -> Result<(), String> {
-    let settings = load_settings(&app);
-    let url = server_url(&settings);
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|e| e.to_string())
-}
-
-// ---------- 内置 DSH 服务命令 ----------
+// ---------- 内置 DSH sidecar 命令 ----------
 
 #[tauri::command]
-fn ensure_server(app: AppHandle, host: String, port: u16) -> Result<bool, String> {
-    let state = app.state::<ServerState>();
-    let mut server = state.0.lock().unwrap();
-    server.ensure_started(&app, &host, port)
+async fn ensure_sidecar(app: AppHandle) -> Result<bool, String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        app.state::<Sidecar>().ensure_started(&app)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn stop_server(app: AppHandle) {
-    let state = app.state::<ServerState>();
-    let mut server = state.0.lock().unwrap();
-    server.stop();
+fn stop_sidecar(app: AppHandle) {
+    app.state::<Sidecar>().stop();
 }
 
 #[tauri::command]
-fn get_server_info(app: AppHandle) -> server::ServerInfo {
-    let state = app.state::<ServerState>();
-    let server = state.0.lock().unwrap();
-    server.info(&app)
+fn sidecar_status(app: AppHandle) -> sidecar::SidecarStatus {
+    app.state::<Sidecar>().status()
 }
 
 #[tauri::command]
-fn open_server_log(app: AppHandle) -> Result<(), String> {
-    let path = ManagedServer::log_path(&app)?;
+fn get_sidecar_info(app: AppHandle) -> sidecar::SidecarInfo {
+    app.state::<Sidecar>().info(&app)
+}
+
+#[tauri::command]
+fn open_sidecar_log(app: AppHandle) -> Result<(), String> {
+    let path = sidecar::Sidecar::log_path(&app)?;
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
@@ -206,18 +199,11 @@ fn open_server_log(app: AppHandle) -> Result<(), String> {
 // ---------- 托盘 ----------
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let status_item =
-        MenuItem::with_id(app, "status", "状态：检测中", true, None::<&str>)?;
+    let status_item = MenuItem::with_id(app, "status", "状态：检测中", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open", "打开 DSH", true, None::<&str>)?;
     let home_item = MenuItem::with_id(app, "home", "返回控制台", true, None::<&str>)?;
-    let autostart_item = CheckMenuItem::with_id(
-        app,
-        "autostart",
-        "开机自启动",
-        true,
-        false,
-        None::<&str>,
-    )?;
+    let autostart_item =
+        CheckMenuItem::with_id(app, "autostart", "开机自启动", true, false, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -246,7 +232,10 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("DSH Desktop")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => {
-                let _ = open_server(app.clone());
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = open_server(app).await;
+                });
             }
             "home" => {
                 let _ = open_home(app.clone());
@@ -297,17 +286,22 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 /// 更新托盘状态文本与自启动勾选，并向主窗口推送 `dsh-status` 事件
 fn sync_tray(app: AppHandle) {
     if let Some(state) = app.try_state::<TrayState>() {
-        let settings = load_settings(&app);
-        let online = ManagedServer::ping(&settings.host, settings.port);
-        let text = if online { "状态：在线" } else { "状态：离线" };
+        let status = app.state::<Sidecar>().status();
+        let text = if status.ready {
+            "状态：就绪"
+        } else if status.online {
+            "状态：启动中"
+        } else {
+            "状态：离线"
+        };
         let _ = state.status_item.set_text(text);
         let enabled = app.autolaunch().is_enabled().unwrap_or(false);
         let _ = state.autostart_item.set_checked(enabled);
         let _ = app.emit(
             "dsh-status",
             StatusPayload {
-                online,
-                url: server_url(&settings),
+                online: status.online,
+                ready: status.ready,
             },
         );
     }
@@ -324,7 +318,7 @@ fn poll_loop(app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 第二个实例启动时，聚焦已有窗口
             if let Some(window) = app.get_webview_window("main") {
@@ -342,29 +336,38 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
-            check_server,
             set_home_url,
             open_server,
             open_home,
-            open_in_browser,
-            ensure_server,
-            stop_server,
-            get_server_info,
-            open_server_log
-        ])
+            ensure_sidecar,
+            stop_sidecar,
+            sidecar_status,
+            get_sidecar_info,
+            open_sidecar_log,
+            // 桥接命令（bridge-client.js 使用）
+            bridge::dsh_rpc,
+            bridge::dsh_cancel,
+            bridge::dsh_subscribe,
+            bridge::dsh_unsubscribe
+        ]);
+    bridge::register_protocol(builder)
+        .on_page_load(|_window, _payload| {})
         .setup(|app| {
             app.manage(HomeUrl(Mutex::new(None)));
-            app.manage(ServerState(Mutex::new(ManagedServer::new())));
+            app.manage(Sidecar::new());
 
-            // 开机自启动（--hidden）时不显示主窗口
+            // 开机自启动（--hidden）时不显示主窗口；否则强制显示，
+            // 覆盖 window-state 记住的「上次退出时隐藏到托盘」状态。
             if std::env::args().any(|a| a == "--hidden") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
+            } else if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
 
             // 点击关闭 → 隐藏到托盘，而不是退出
-            // （Tauri 默认允许 webview 导航到 http/https，可直接内嵌 DSH Web GUI）
             if let Some(window) = app.get_webview_window("main") {
                 let win = window.clone();
                 window.on_window_event(move |event| {
@@ -377,17 +380,12 @@ pub fn run() {
 
             setup_tray(app.handle())?;
 
-            // 自动启动内置 DSH 服务（默认开启；端口已被占用则直接复用）
+            // 自动启动内置 DSH sidecar（默认开启）
             let settings = load_settings(app.handle());
-            let host = settings.host.clone();
-            let port = settings.port;
             if settings.auto_start_server {
                 let app = app.handle().clone();
                 thread::spawn(move || {
-                    let state = app.state::<ServerState>();
-                    let mut server = state.0.lock().unwrap();
-                    // 只拉起进程（毫秒级），等待端口就绪由探活线程负责
-                    let _ = server.spawn_server(&app, &host, port);
+                    let _ = app.state::<Sidecar>().ensure_started(&app);
                 });
             }
 
@@ -401,10 +399,8 @@ pub fn run() {
         .run(|app, event| {
             // 应用退出时终止内置 DSH 进程树
             if let RunEvent::Exit = event {
-                if let Some(state) = app.try_state::<ServerState>() {
-                    if let Ok(mut server) = state.0.lock() {
-                        server.stop();
-                    }
+                if let Some(state) = app.try_state::<Sidecar>() {
+                    state.stop();
                 }
             }
         });
