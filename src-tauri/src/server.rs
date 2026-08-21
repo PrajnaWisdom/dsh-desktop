@@ -15,6 +15,40 @@ use std::{
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+/// 去掉 Windows verbatim 前缀（`\\?\` / `\\?\UNC\`），返回普通路径。
+///
+/// Tauri 的 `resource_dir()` 在 Windows 上可能返回 `\\?\D:\...` 形式的
+/// verbatim 路径；Node.js 22.20+（含捆绑的 v22.21.1）无法把这种路径解析为
+/// 主模块，会把 `\\?\D:\...` 弄成只剩盘符的 `D:`，并以
+/// `EISDIR: illegal operation on a directory, lstat 'D:'` 崩溃
+/// （见 nodejs/node#60435）。因此所有交给内置 Node 子进程的路径
+/// （node.exe、bin.js、DSH_HOME 等）都必须先规范化。
+#[cfg(windows)]
+fn strip_verbatim_prefix(p: &std::path::Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let wide: Vec<u16> = p.as_os_str().encode_wide().collect();
+    const VERBATIM: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    if !wide.starts_with(&VERBATIM) {
+        return p.to_path_buf();
+    }
+    let rest = &wide[4..];
+    let mut out: Vec<u16> = Vec::with_capacity(rest.len());
+    if rest.starts_with(&[b'U' as u16, b'N' as u16, b'C' as u16, b'\\' as u16]) {
+        // \\?\UNC\server\share\... -> \\server\share\...
+        out.extend_from_slice(&[b'\\' as u16, b'\\' as u16]);
+        out.extend_from_slice(&rest[4..]);
+    } else {
+        // \\?\D:\... -> D:\...
+        out.extend_from_slice(rest);
+    }
+    PathBuf::from(std::ffi::OsString::from_wide(&out))
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(p: &std::path::Path) -> PathBuf {
+    p.to_path_buf()
+}
+
 /// 由 `tauri::State` 持有的内置服务器句柄
 pub struct ManagedServer {
     child: Option<Child>,
@@ -48,7 +82,8 @@ impl ManagedServer {
     }
 
     pub(crate) fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let raw = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let dir = strip_verbatim_prefix(&raw);
         std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建数据目录: {e}"))?;
         Ok(dir)
     }
@@ -65,8 +100,9 @@ impl ManagedServer {
 
     /// 内置资源路径：`<resource_dir>/node/node.exe` 与
     /// `<resource_dir>/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js`
+    /// （资源目录先去掉 Windows verbatim 前缀，否则 Node 无法解析脚本路径）
     fn bundled_paths(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
-        let res = app.path().resource_dir().ok()?;
+        let res = strip_verbatim_prefix(&app.path().resource_dir().ok()?);
         let node = res.join("node").join("node.exe");
         let bin = res
             .join("dsh")
