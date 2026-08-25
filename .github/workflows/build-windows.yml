@@ -47,10 +47,32 @@ jobs:
       - name: Install DSH package (bundled, Windows natives)
         shell: pwsh
         run: |
+          $ver = "${{ env.DSH_VERSION }}"
           New-Item -ItemType Directory -Force -Path src-tauri/resources/dsh | Out-Null
-          Set-Content -Path src-tauri/resources/dsh/package.json -Value '{"name":"dsh-bundled","private":true}'
+          # 用 npm overrides 把 web 渲染链子包钉到与主包同一版本，
+          # 防止 npm 按 ^ 范围浮升子包，导致 dsh-host-frontend-static 调用的
+          # renderIndex 与 dsh-host-webserver 提供的 applyIndexTaps 错位。
+          $overrides = @{
+            "@deepseek-ai/dsh-host-frontend-static" = $ver
+            "@deepseek-ai/dsh-host-webserver"       = $ver
+            "@deepseek-ai/dsh-web-app"              = $ver
+            "@deepseek-ai/dsh-web-frontend"         = $ver
+            "@deepseek-ai/dsh-web"                  = $ver
+          }
+          @{
+            name      = "dsh-bundled"
+            private   = $true
+            overrides = $overrides
+          } | ConvertTo-Json -Depth 5 | Set-Content -Path src-tauri/resources/dsh/package.json
           Push-Location src-tauri/resources/dsh
-          npm install --no-audit --no-fund "@deepseek-ai/dsh@${{ env.DSH_VERSION }}"
+          npm install --no-audit --no-fund --save-exact "@deepseek-ai/dsh@$ver"
+          # 校验：渲染链子包必须与主包同版本，不一致直接让构建失败
+          $main = (Get-Content "node_modules/@deepseek-ai/dsh/package.json" -Raw | ConvertFrom-Json).version
+          foreach ($p in @("dsh-host-frontend-static", "dsh-host-webserver", "dsh-web-app")) {
+            $v = (Get-Content "node_modules/@deepseek-ai/$p/package.json" -Raw | ConvertFrom-Json).version
+            if ($v -ne $main) { Write-Error "@deepseek-ai/$p=$v 与 dsh=$main 版本不一致"; exit 1 }
+            Write-Host "  ok @deepseek-ai/$p = $v"
+          }
           Pop-Location
           Get-Item "src-tauri/resources/dsh/node_modules/@deepseek-ai/dsh/package.json" | Select-Object FullName
 
