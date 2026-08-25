@@ -69,6 +69,10 @@ function shimRequest(request) {
   req.method = request.method;
   req.url = `${url.pathname}${url.search}`;
   req.headers = headers;
+  // Route C never opens a socket, but node:http-shaped consumers (e.g. a
+  // plugin's loopback guard reading `req.socket.remoteAddress`) expect it.
+  // The sidecar is loopback-only by construction, so report 127.0.0.1.
+  req.socket = { remoteAddress: '127.0.0.1' };
   // http-bridge reads the body with `for await (const chunk of req)`.
   req[Symbol.asyncIterator] = async function* () {
     if (request.body) for await (const chunk of request.body) yield chunk;

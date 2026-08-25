@@ -148,6 +148,10 @@ export async function bootSidecar() {
   const patches = [
     ...profile.layers.flatMap((layer) => layer.patches),
     ...profile.patches,
+    // 内置插件层：dsh-update-check（检测/提示更新）随桌面客户端打包，
+    // 由 install_sidecar 复制到 `@dsh-desktop/dsh-update-check`，这里直接
+    // 插入其 cordis 行，无需用户改 profile 的 bundles 列表。
+    { insert: [{ id: 'ui-dsh-update-check', name: '@dsh-desktop/dsh-update-check' }] },
     ...overlay
   ];
 
