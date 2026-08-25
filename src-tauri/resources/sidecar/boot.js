@@ -164,6 +164,10 @@ export async function bootSidecar() {
       // The launcher facts the web composition reads (mirrors runProfile).
       hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment);
       provideCmdline(hostCtx, { args: [], exit: () => process.exit(0) });
+      // Give the shim the root context so renderIndex can emit the
+      // `webserver/index-inject` event (client-modules / client-ui-theme
+      // contribute their rows there).
+      carrier.ctx = hostCtx;
       // The webServer service must exist before entries mount.
       hostCtx.provide('webServer', carrier);
     });

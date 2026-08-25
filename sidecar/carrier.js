@@ -80,6 +80,56 @@ function shimRequest(request) {
   return req;
 }
 
+// ---- structured index injections (mirrors @deepseek-ai/dsh-host-webserver) ----
+
+function escapeHtmlAttribute(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function renderRow(row) {
+  switch (row.kind) {
+    case 'global':
+      return {
+        placement: 'head',
+        markup: `<script>globalThis[${JSON.stringify(row.name).replaceAll('<', '\\u003c')}] = ${row.value === undefined ? 'undefined' : JSON.stringify(row.value).replaceAll('<', '\\u003c')}<\/script>`
+      };
+    case 'script':
+      return { placement: row.placement, markup: `<script>${row.text}<\/script>` };
+    case 'script-src':
+      return { placement: row.placement, markup: `<script src="${escapeHtmlAttribute(row.src)}"><\/script>` };
+    case 'style':
+      return { placement: 'head', markup: `<style>${row.text}</style>` };
+    case 'html':
+      return { placement: row.placement, markup: row.html };
+    default:
+      throw new Error(`webserver: unknown index injection row ${JSON.stringify(row)}`);
+  }
+}
+
+function splice(html, at, markup) {
+  return `${html.slice(0, at)}${markup}${html.slice(at)}`;
+}
+
+function renderIndexInjections(html, rows) {
+  let head = '';
+  let body = '';
+  for (const row of rows) {
+    const rendered = renderRow(row);
+    if (rendered.placement === 'head') head += rendered.markup;
+    else body += rendered.markup;
+  }
+  let out = html;
+  if (head !== '') {
+    const open = /<head(?:\s[^>]*)?>/i.exec(out);
+    out = open === null ? `${head}${out}` : splice(out, open.index + open[0].length, head);
+  }
+  if (body !== '') {
+    const open = /<body(?:\s[^>]*)?>/i.exec(out);
+    out = open === null ? `${out}${body}` : splice(out, open.index + open[0].length, body);
+  }
+  return out;
+}
+
 /** The Route C webServer shim. */
 export class StdioWebServer {
   constructor() {
@@ -139,6 +189,26 @@ export class StdioWebServer {
 
   applyIndexTaps(html) {
     return this.indexTaps.reduce((current, tap) => tap(current), html);
+  }
+
+  /**
+   * Gather the structured injection table (mirrors the real WebServer's
+   * `collectIndexInjections`): one `webserver/index-inject` emit; subscribers
+   * (client-modules, client-ui-theme) push their live rows into the table.
+   */
+  collectIndexInjections() {
+    const table = [];
+    if (this.ctx?.emit) this.ctx.emit('webserver/index-inject', table);
+    return table;
+  }
+
+  /**
+   * Render one index.html body: structured injections first, then the raw
+   * `tapIndex` transforms — the exact pipeline the real WebServer runs in
+   * `renderIndex`. frontend-static calls this on every index response.
+   */
+  renderIndex(html) {
+    return this.applyIndexTaps(renderIndexInjections(html, this.collectIndexInjections()));
   }
 
   /** exact-first, then longest-prefix — mirroring the web carrier. */
