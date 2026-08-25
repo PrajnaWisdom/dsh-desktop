@@ -126,7 +126,11 @@
     }).then(function (result) {
       if (cancelled) throw new DOMException('The user aborted a request.', 'AbortError');
       var resHeaders = new Headers(headerPairsToObject(result.headers));
-      var bytes = base64ToBytes(result.bodyB64);
+      // Rust `RpcResult` 的 serde 字段名是 snake_case（body_b64），而早期
+      // bridge 契约用 camelCase（bodyB64）。两边都兼容，避免 WebView 拿到
+      // 空 body 导致 resp.json() 抛 “invalid JSON response”。
+      var b64 = result.bodyB64 !== undefined ? result.bodyB64 : result.body_b64;
+      var bytes = base64ToBytes(b64);
       return new Response(bytes, { status: result.status, statusText: '', headers: resHeaders });
     }).catch(function (err) {
       if (cancelled) throw new DOMException('The user aborted a request.', 'AbortError');
