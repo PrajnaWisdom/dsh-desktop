@@ -178,6 +178,28 @@ impl Sidecar {
         Ok(dir)
     }
 
+    /// 递归复制目录内容到目标（幂等，覆盖旧版本）。
+    fn copy_dir_recursive(from: &PathBuf, to: &PathBuf) -> Result<(), String> {
+        std::fs::create_dir_all(to).map_err(|e| format!("无法创建目录 {}: {e}", to.display()))?;
+        let entries = std::fs::read_dir(from)
+            .map_err(|e| format!("无法读取目录 {}: {e}", from.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+            let src = entry.path();
+            let dst = to.join(entry.file_name());
+            let ty = entry
+                .file_type()
+                .map_err(|e| format!("获取文件类型失败 {}: {e}", src.display()))?;
+            if ty.is_dir() {
+                Self::copy_dir_recursive(&src, &dst)?;
+            } else {
+                std::fs::copy(&src, &dst)
+                    .map_err(|e| format!("复制 {} 失败: {e}", src.display()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// 把 sidecar 源码复制到 DSH_HOME 的扁平回退目录（幂等，覆盖旧版本）。
     fn install_sidecar(app: &AppHandle) -> Result<PathBuf, String> {
         let Some(source) = Self::sidecar_source(app) else {
@@ -193,6 +215,16 @@ impl Sidecar {
                 Ok(_) => {}
                 Err(e) => return Err(format!("复制 sidecar {name} 失败: {e}")),
             }
+        }
+        // 内置插件：复制到 `@dsh-desktop/dsh-update-check`（与 sidecar 同级，
+        // Node 从 profile 目录向上遍历可解析，boot.js 据此注入插件行）。
+        let plugin_src = source.join("dsh-update-check");
+        if plugin_src.join("package.json").is_file() {
+            let plugin_dst = dest
+                .parent()
+                .ok_or("sidecar 安装目录无父目录")?
+                .join("dsh-update-check");
+            Self::copy_dir_recursive(&plugin_src, &plugin_dst)?;
         }
         Ok(dest)
     }
@@ -481,8 +513,11 @@ impl Sidecar {
         if let Some(pid) = pid {
             #[cfg(windows)]
             {
+                use std::os::windows::process::CommandExt;
+                // CREATE_NO_WINDOW：退出时 taskkill 不再闪控制台窗口
                 let _ = Command::new("taskkill")
                     .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .creation_flags(0x0800_0000)
                     .status();
             }
             #[cfg(not(windows))]
