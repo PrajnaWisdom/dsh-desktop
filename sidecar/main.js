@@ -49,7 +49,16 @@ async function handleFetch(msg) {
     const response = await sharedHandler.fetch(request);
     const status = response.status;
     const responseHeaders = [...response.headers.entries()];
-    const buffer = Buffer.from(await response.arrayBuffer());
+    let buffer = Buffer.from(await response.arrayBuffer());
+    // WebView2 会忽略 content-type 的 charset，按系统 ANSI 码页（中文
+    // Windows 为 GBK）解码响应，把 UTF-8 中文 JSON 读成乱码。在 sidecar 侧
+    // 把 JSON 响应的非 ASCII 转义成 \uXXXX 使正文纯 ASCII，任何解码下
+    // JSON.parse 都能还原中文（对 dsh_rpc 与 dsh:// 两条路径都生效）。
+    const ct = response.headers.get('content-type') || '';
+    if (/json/i.test(ct) && buffer.length > 0) {
+      const ascii = buffer.toString('utf8').replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+      buffer = Buffer.from(ascii, 'utf8');
+    }
     send({ t: 'response', id, status, headers: responseHeaders, bodyB64: buffer.toString('base64') });
   } catch (error) {
     if (error?.name === 'AbortError') {
