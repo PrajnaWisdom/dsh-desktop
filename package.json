@@ -1,8 +1,8 @@
-{
+﻿{
   "name": "dsh-desktop",
   "private": true,
-  "version": "0.4.2",
-  "description": "DSH Desktop — 内嵌 DSH Web GUI 的 Windows 桌面客户端（Tauri 2）",
+  "version": "0.4.3",
+  "description": "DSH Desktop 鈥?鍐呭祵 DSH Web GUI 鐨?Windows 妗岄潰瀹㈡埛绔紙Tauri 2锛?,
   "type": "module",
   "scripts": {
     "dev": "vite",
