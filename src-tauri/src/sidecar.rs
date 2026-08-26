@@ -493,6 +493,13 @@ impl Sidecar {
         }
         // EOF：子进程退出
         inner.ready.store(false, Ordering::SeqCst);
+        // 修复：清空已退出的 child/writer，否则 spawn() 因 child.is_some() 直接返回、
+        // ensure_started 只能空等 90 秒超时，无法重新拉起 sidecar。
+        if let Some(mut child) = inner.child.lock().unwrap().take() {
+            let _ = child.wait();
+        }
+        *inner.writer.lock().unwrap() = None;
+        inner.pending.lock().unwrap().clear();
         let _ = app.emit("dsh-status", Self::status_of(&inner));
     }
 
