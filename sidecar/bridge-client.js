@@ -131,6 +131,17 @@
       // 空 body 导致 resp.json() 抛 “invalid JSON response”。
       var b64 = result.bodyB64 !== undefined ? result.bodyB64 : result.body_b64;
       var bytes = base64ToBytes(b64);
+      // WebView2 会忽略 content-type 的 charset，按系统 ANSI 码页（中文
+      // Windows 为 GBK）解码 JS 构造的 Response，把 UTF-8 中文 JSON 读成乱码。
+      // 对 JSON 响应把非 ASCII 转义成 \uXXXX 使正文纯 ASCII，任何解码下
+      // JSON.parse 都能还原中文（与插件侧 writeJson 的转义互为双保险）。
+      var ct = resHeaders.get('content-type') || '';
+      if (/json/i.test(ct) && bytes.length > 0) {
+        var asciiText = new TextDecoder('utf-8').decode(bytes).replace(/[\u0080-\uffff]/g, function (c) {
+          return '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
+        });
+        bytes = new TextEncoder().encode(asciiText);
+      }
       return new Response(bytes, { status: result.status, statusText: '', headers: resHeaders });
     }).catch(function (err) {
       if (cancelled) throw new DOMException('The user aborted a request.', 'AbortError');
