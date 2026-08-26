@@ -25,6 +25,14 @@ import { bootSidecar, log, DSH_HOME, serverRequest } from './boot.js';
 console.log = console.info = console.warn = console.debug = (...args) => process.stderr.write(args.map(String).join(' ') + '\n');
 console.error = (...args) => process.stderr.write(args.map(String).join(' ') + '\n');
 
+// ---- 进程退出原因诊断（定位 sidecar 意外退出）----
+process.on('exit', (code) => { try { process.stderr.write(`[diag] process exit code=${code}\n`); } catch {} });
+process.on('uncaughtException', (e) => { try { process.stderr.write(`[diag] UNCAUGHT: ${e?.stack || e}\n`); } catch {} });
+process.on('unhandledRejection', (e) => { try { process.stderr.write(`[diag] UNHANDLED REJECTION: ${e?.stack || e}\n`); } catch {} });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  try { process.on(sig, () => { try { process.stderr.write(`[diag] signal ${sig}\n`); } catch {} }); } catch {}
+}
+
 const send = (msg) => { process.stdout.write(`${JSON.stringify(msg)}\n`); };
 
 const started = Date.now();
@@ -47,9 +55,11 @@ async function handleFetch(msg) {
       signal: controller.signal
     });
     const response = await sharedHandler.fetch(request);
+    log(`[diag] ${id} fetch-done status=${response.status}`);
     const status = response.status;
     const responseHeaders = [...response.headers.entries()];
     let buffer = Buffer.from(await response.arrayBuffer());
+    log(`[diag] ${id} arrayBuffer bytes=${buffer.length}`);
     // WebView2 会忽略 content-type 的 charset，按系统 ANSI 码页（中文
     // Windows 为 GBK）解码响应，把 UTF-8 中文 JSON 读成乱码。在 sidecar 侧
     // 把 JSON 响应的非 ASCII 转义成 \uXXXX 使正文纯 ASCII，任何解码下
@@ -59,7 +69,9 @@ async function handleFetch(msg) {
       const ascii = buffer.toString('utf8').replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
       buffer = Buffer.from(ascii, 'utf8');
     }
+    log(`[diag] ${id} escape bytes=${buffer.length}`);
     send({ t: 'response', id, status, headers: responseHeaders, bodyB64: buffer.toString('base64') });
+    log(`[diag] sent ${id} status=${status} ct=${(ct || '').slice(0, 48)} bytes=${buffer.length}`);
   } catch (error) {
     if (error?.name === 'AbortError') {
       send({ t: 'aborted', id });
@@ -166,6 +178,7 @@ rl.on('line', (line) => {
   else void handleLine(line).catch((error) => log('handleLine error:', error?.message ?? error));
 });
 rl.on('close', () => {
+  log('[diag] stdin closed, draining pending work...');
   // Drain in-flight work before exiting: stdin EOF must not kill a pending
   // RPC (the desktop shell may close the pipe while requests are in flight).
   const drain = async () => {

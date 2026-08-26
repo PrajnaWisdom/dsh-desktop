@@ -216,15 +216,18 @@ impl Sidecar {
                 Err(e) => return Err(format!("复制 sidecar {name} 失败: {e}")),
             }
         }
-        // 内置插件：复制到 `@dsh-desktop/dsh-update-check`（与 sidecar 同级，
-        // Node 从 profile 目录向上遍历可解析，boot.js 据此注入插件行）。
-        let plugin_src = source.join("dsh-update-check");
-        if plugin_src.join("package.json").is_file() {
-            let plugin_dst = dest
-                .parent()
-                .ok_or("sidecar 安装目录无父目录")?
-                .join("dsh-update-check");
-            Self::copy_dir_recursive(&plugin_src, &plugin_dst)?;
+        // 内置插件：复制到 `@dsh-desktop/<plugin>`（与 sidecar 同级，Node 从
+        // profile 目录向上遍历可解析，boot.js 据此注入插件行）。
+        const BUNDLED_PLUGINS: [&str; 2] = ["dsh-update-check", "dsh-skills-mcp-manager"];
+        for plugin in BUNDLED_PLUGINS {
+            let plugin_src = source.join(plugin);
+            if plugin_src.join("package.json").is_file() {
+                let plugin_dst = dest
+                    .parent()
+                    .ok_or("sidecar 安装目录无父目录")?
+                    .join(plugin);
+                Self::copy_dir_recursive(&plugin_src, &plugin_dst)?;
+            }
         }
         Ok(dest)
     }
