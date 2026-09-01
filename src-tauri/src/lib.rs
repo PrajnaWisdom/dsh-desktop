@@ -14,6 +14,7 @@
 //! - 关闭窗口时隐藏到托盘，开机自启动时以 --hidden 参数启动
 
 mod bridge;
+mod notify;
 mod sidecar;
 
 use std::{path::PathBuf, sync::Mutex, thread, time::Duration};
@@ -348,7 +349,9 @@ pub fn run() {
             bridge::dsh_rpc,
             bridge::dsh_cancel,
             bridge::dsh_subscribe,
-            bridge::dsh_unsubscribe
+            bridge::dsh_unsubscribe,
+            // 桌面通知（dsh-notify 使用）
+            notify::show_notification
         ]);
     bridge::register_protocol(builder)
         .on_page_load(|_window, _payload| {})
