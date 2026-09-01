@@ -198,9 +198,12 @@ fn open_sidecar_log(app: AppHandle) -> Result<(), String> {
 }
 
 /// 重启整个桌面应用（含窗口与内置 DSH sidecar）。
+/// 用 async + `app.restart()`：命令在非主线程执行，restart() 走 request_exit
+/// 事件循环，触发完整 ExitRequested/Exit 清理（single-instance 锁随之释放），
+/// 避免新进程被 single-instance 误判为重复实例而立即退出。
 #[tauri::command]
-fn restart_app(app: AppHandle) {
-    app.request_restart();
+async fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 // ---------- 托盘 ----------
