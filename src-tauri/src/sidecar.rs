@@ -82,6 +82,12 @@ pub struct SidecarInner {
     ready: AtomicBool,
     dsh_version: Mutex<Option<String>>,
     next_seq: AtomicU64,
+    /// 用户主动停止（stop()）时为 true，此时不自动重启。
+    stopping: AtomicBool,
+    /// 自动重启进行中标志，避免并发重启。
+    restarting: AtomicBool,
+    /// 上次自动重启时间（用于崩溃循环保护）。
+    last_restart_at: Mutex<Option<std::time::Instant>>,
 }
 
 /// 由 `tauri::State` 持有（Send + Sync）。
@@ -96,6 +102,9 @@ impl Sidecar {
             ready: AtomicBool::new(false),
             dsh_version: Mutex::new(None),
             next_seq: AtomicU64::new(1),
+            stopping: AtomicBool::new(false),
+            restarting: AtomicBool::new(false),
+            last_restart_at: Mutex::new(None),
         }))
     }
 
@@ -378,6 +387,7 @@ impl Sidecar {
         *self.0.writer.lock().unwrap() = Some(stdin);
         self.0.ready.store(false, Ordering::SeqCst);
         *self.0.dsh_version.lock().unwrap() = None;
+        self.0.stopping.store(false, Ordering::SeqCst);
 
         let inner = self.0.clone();
         let app = app.clone();
@@ -504,6 +514,41 @@ impl Sidecar {
         *inner.writer.lock().unwrap() = None;
         inner.pending.lock().unwrap().clear();
         let _ = app.emit("dsh-status", Self::status_of(&inner));
+
+        // 自动重启：非主动 stop 时，延迟后重新拉起 sidecar。
+        if !inner.stopping.load(Ordering::SeqCst) {
+            Self::schedule_auto_restart(app.clone(), inner.clone());
+        }
+    }
+
+    /// 延迟自动重启 sidecar（带崩溃循环保护）。
+    fn schedule_auto_restart(app: AppHandle, inner: Arc<SidecarInner>) {
+        if inner.restarting.swap(true, Ordering::SeqCst) {
+            return; // 已在重启中
+        }
+        // 崩溃循环保护：若距上次自动重启不足 5 秒（起来就崩），停止自动重启，
+        // 避免无限重启；正常运行后（间隔 > 5 秒）再崩溃仍会正常重启。
+        let now = std::time::Instant::now();
+        {
+            let mut last = inner.last_restart_at.lock().unwrap();
+            if let Some(prev) = *last {
+                if now.duration_since(prev) < Duration::from_secs(5) {
+                    inner.restarting.store(false, Ordering::SeqCst);
+                    eprintln!("[dsh-desktop] sidecar 连续快速崩溃，已停止自动重启，请检查日志或手动重启");
+                    return;
+                }
+            }
+            *last = Some(now);
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            let sidecar = Sidecar(inner.clone());
+            let result = sidecar.spawn(&app);
+            inner.restarting.store(false, Ordering::SeqCst);
+            if let Err(e) = result {
+                eprintln!("[dsh-desktop] sidecar 自动重启失败: {e}");
+            }
+        });
     }
 
     fn status_of(inner: &SidecarInner) -> SidecarStatus {
@@ -516,6 +561,8 @@ impl Sidecar {
 
     /// 终止 sidecar 进程树（Windows 用 taskkill /T 确保子进程一并结束）。
     pub fn stop(&self) {
+        // 标记为主动停止：sidecar 退出后不自动重启。
+        self.0.stopping.store(true, Ordering::SeqCst);
         let pid = {
             let mut guard = self.0.child.lock().unwrap();
             guard.take().map(|child| child.id())
