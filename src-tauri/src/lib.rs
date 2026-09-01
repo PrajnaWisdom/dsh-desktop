@@ -197,6 +197,12 @@ fn open_sidecar_log(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 重启整个桌面应用（含窗口与内置 DSH sidecar）。
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.request_restart();
+}
+
 // ---------- 托盘 ----------
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -351,7 +357,9 @@ pub fn run() {
             bridge::dsh_subscribe,
             bridge::dsh_unsubscribe,
             // 桌面通知（dsh-notify 使用）
-            notify::show_notification
+            notify::show_notification,
+            // 重启整个桌面应用（前端右键菜单使用）
+            restart_app
         ]);
     bridge::register_protocol(builder)
         .on_page_load(|_window, _payload| {})

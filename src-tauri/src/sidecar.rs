@@ -88,6 +88,8 @@ pub struct SidecarInner {
     restarting: AtomicBool,
     /// 上次自动重启时间（用于崩溃循环保护）。
     last_restart_at: Mutex<Option<std::time::Instant>>,
+    /// 进程代际：每次 spawn 递增，reader_loop 据此判断自己是否已被新进程取代。
+    generation: AtomicU64,
 }
 
 /// 由 `tauri::State` 持有（Send + Sync）。
@@ -105,6 +107,7 @@ impl Sidecar {
             stopping: AtomicBool::new(false),
             restarting: AtomicBool::new(false),
             last_restart_at: Mutex::new(None),
+            generation: AtomicU64::new(0),
         }))
     }
 
@@ -388,10 +391,11 @@ impl Sidecar {
         self.0.ready.store(false, Ordering::SeqCst);
         *self.0.dsh_version.lock().unwrap() = None;
         self.0.stopping.store(false, Ordering::SeqCst);
+        let gen = self.0.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         let inner = self.0.clone();
         let app = app.clone();
-        std::thread::spawn(move || Self::reader_loop(app, stdout, inner, log_path));
+        std::thread::spawn(move || Self::reader_loop(app, stdout, inner, log_path, gen));
         Ok(())
     }
 
@@ -442,7 +446,13 @@ impl Sidecar {
     }
 
     /// 读线程：解析 sidecar stdout，投递 response / 转发 frame / 跟踪状态。
-    fn reader_loop(app: AppHandle, stdout: ChildStdout, inner: Arc<SidecarInner>, _log_path: PathBuf) {
+    fn reader_loop(
+        app: AppHandle,
+        stdout: ChildStdout,
+        inner: Arc<SidecarInner>,
+        _log_path: PathBuf,
+        gen: u64,
+    ) {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let line = match line {
@@ -505,6 +515,11 @@ impl Sidecar {
             }
         }
         // EOF：子进程退出
+        // 代际检查：若期间已有新进程 spawn（generation 变化），本线程的清理与自动重启
+        // 让位给新进程，避免手动重启 stop→spawn 时旧读线程误清新进程状态。
+        if inner.generation.load(Ordering::SeqCst) != gen {
+            return;
+        }
         inner.ready.store(false, Ordering::SeqCst);
         // 修复：清空已退出的 child/writer，否则 spawn() 因 child.is_some() 直接返回、
         // ensure_started 只能空等 90 秒超时，无法重新拉起 sidecar。
