@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop"
-version = "0.4.13"
+version = "0.4.14"
 description = "DSH Desktop — 内嵌 DSH Web GUI 的 Windows 桌面客户端"
 authors = ["DSH Desktop Contributors"]
 edition = "2021"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "webview-data-url"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-window-state = "2"
