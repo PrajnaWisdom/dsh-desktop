@@ -197,48 +197,6 @@ fn open_sidecar_log(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 重启整个桌面应用（含窗口与内置 DSH sidecar）。
-/// 手动实现，绕开 Tauri 原生 restart 与 single-instance 锁的时序竞态：
-/// 用独立 PowerShell 进程「等到本进程完全退出（Exit 事件 stop sidecar、
-/// 释放 single-instance 锁）后再拉起新进程」，并带 15s 超时兜底——
-/// 固定延迟（ping）可能撞上旧进程尚未退出的窗口，导致新实例被误判
-/// 为重复实例而自杀，表现为「点了重启没反应」。
-#[tauri::command]
-fn restart_app(app: AppHandle) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("获取当前程序路径失败: {e}"))?;
-
-    #[cfg(target_os = "windows")]
-    {
-        let pid = std::process::id();
-        // 路径若含单引号需转义（Start-Process -FilePath 用单引号包裹）。
-        let exe_str = exe.to_string_lossy().replace('\'', "''");
-        let script = format!(
-            "$d=(Get-Date).AddSeconds(15); Start-Sleep -Milliseconds 300; \
-             while ((Get-Process -Id {pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $d)) {{ Start-Sleep -Milliseconds 250 }}; \
-             Start-Process -FilePath '{exe_str}'",
-            pid = pid,
-            exe_str = exe_str
-        );
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-            .spawn()
-            .map_err(|e| format!("安排延迟重启失败: {e}"))?;
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let cmd = format!("sleep 1; exec \"{}\"", exe.display());
-        std::process::Command::new("sh")
-            .args(["-c", &cmd])
-            .spawn()
-            .map_err(|e| format!("安排延迟重启失败: {e}"))?;
-    }
-
-    // 触发 Tauri 正常退出（Exit 事件：stop sidecar + 释放 single-instance 锁）
-    app.exit(0);
-
-    Ok(())
-}
-
 // ---------- 托盘 ----------
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -394,8 +352,6 @@ pub fn run() {
             bridge::dsh_unsubscribe,
             // 桌面通知（dsh-notify 使用）
             notify::show_notification,
-            // 重启整个桌面应用（前端右键菜单使用）
-            restart_app
         ]);
     bridge::register_protocol(builder)
         .on_page_load(|_window, _payload| {})
