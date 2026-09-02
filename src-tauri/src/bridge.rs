@@ -46,7 +46,7 @@ pub async fn dsh_rpc(
         Ok(RpcResult {
             status: outcome.status,
             headers: outcome.headers,
-            body_b64: outcome.body_b64,
+            body_b64: b64_encode(&outcome.body),
         })
     })
     .await
@@ -132,9 +132,7 @@ fn handle_protocol_request(
     let id = sidecar.mint_id();
     match sidecar.rpc(&id, &url, &method, &headers, body.as_deref()) {
         Ok(outcome) => {
-            let Some(bytes) = b64_decode(&outcome.body_b64) else {
-                return fallback(500, "sidecar: 响应体解码失败");
-            };
+            let bytes = outcome.body;
             let mut builder = tauri::http::Response::builder().status(outcome.status);
             for (name, value) in &outcome.headers {
                 if name.eq_ignore_ascii_case("transfer-encoding")
@@ -155,35 +153,33 @@ fn handle_protocol_request(
     }
 }
 
-/// 极简 base64 解码（标准字母表 + 末尾填充），用于 sidecar 响应体。
-/// 不引入额外依赖；仅处理 sidecar 生成的合法输入。
-fn b64_decode(input: &str) -> Option<Vec<u8>> {
+/// 极简 base64 编码（标准字母表 + 填充），用于 `dsh_rpc` 的 JSON 返回体。
+/// 不引入额外依赖；与 bridge-client.js 的 `atob` 解码配套。
+fn b64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut rev = [255u8; 256];
-    for (i, &c) in TABLE.iter().enumerate() {
-        rev[c as usize] = i as u8;
+    let mut out = Vec::with_capacity((input.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
+        out.push(TABLE[(n >> 18) as usize & 0x3f]);
+        out.push(TABLE[(n >> 12) as usize & 0x3f]);
+        out.push(TABLE[(n >> 6) as usize & 0x3f]);
+        out.push(TABLE[n as usize & 0x3f]);
+        i += 3;
     }
-    let bytes = input.as_bytes();
-    if bytes.len() % 4 != 0 {
-        return None;
+    let rem = input.len() - i;
+    if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        out.push(TABLE[(n >> 18) as usize & 0x3f]);
+        out.push(TABLE[(n >> 12) as usize & 0x3f]);
+        out.push(b'=');
+        out.push(b'=');
+    } else if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        out.push(TABLE[(n >> 18) as usize & 0x3f]);
+        out.push(TABLE[(n >> 12) as usize & 0x3f]);
+        out.push(TABLE[(n >> 6) as usize & 0x3f]);
+        out.push(b'=');
     }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    for &b in bytes {
-        if b == b'=' {
-            break; // 填充开始（合法输入只在末尾）
-        }
-        let v = rev[b as usize];
-        if v == 255 {
-            return None;
-        }
-        acc = (acc << 6) | v as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
+    String::from_utf8(out).unwrap_or_default()
 }

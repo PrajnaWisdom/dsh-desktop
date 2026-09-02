@@ -8,7 +8,9 @@
 //!     {"t":"unsubscribe","id":"s1"}  {"t":"ping"}  {"t":"shutdown"}
 //!   in（来自 sidecar）:
 //!     {"t":"ready",...} {"t":"pong"}
-//!     {"t":"response","id","status","headers":[["name","value"],...],"bodyB64"}
+//!     {"t":"response","id","status","headers":[["name","value"],...]}
+//!       随后是分帧 body：多个 [u32 大端长度][原始字节] 块，以长度 0 结束；
+//!       长度 0xFFFFFFFF 表示中止（body 不完整）。
 //!     {"t":"aborted","id"}
 //!     {"t":"frame","id","frame":{...}} {"t":"end","id"}
 //! stdout 是协议通道；sidecar 日志走 stderr（本模块重定向到日志文件）。
@@ -17,7 +19,7 @@
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
@@ -58,12 +60,12 @@ fn strip_verbatim_prefix(p: &std::path::Path) -> PathBuf {
     p.to_path_buf()
 }
 
-/// 一次 /api RPC 的结果（body 以 base64 传输，兼容二进制）。
+/// 一次 /api RPC 的结果（body 为原始字节，sidecar 侧已不再 base64）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcOutcome {
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body_b64: String,
+    pub body: Vec<u8>,
 }
 
 /// sidecar 状态快照（推给托盘与前端）。
@@ -453,13 +455,19 @@ impl Sidecar {
         _log_path: PathBuf,
         gen: u64,
     ) {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
+        let mut reader = BufReader::new(stdout);
+        loop {
+            // 协议行以 \n 结尾；response 的 body 是紧跟其后的长度前缀原始字节。
+            let mut line = Vec::new();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break, // EOF
+                Ok(_) => {}
                 Err(_) => break,
-            };
-            let msg: serde_json::Value = match serde_json::from_str(&line) {
+            }
+            while line.last() == Some(&b'\n') || line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let msg: serde_json::Value = match serde_json::from_slice(&line) {
                 Ok(v) => v,
                 Err(_) => continue, // 非协议行（sidecar 残留 stdout），忽略
             };
@@ -471,30 +479,44 @@ impl Sidecar {
                     }
                     let _ = app.emit("dsh-status", Self::status_of(&inner));
                 }
-                Some("response") | Some("aborted") => {
+                Some("response") => {
+                    let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let status = msg.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
+                    let headers = msg
+                        .get("headers")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|h| {
+                                    let name = h.get(0)?.as_str()?.to_string();
+                                    let value = h.get(1)?.as_str()?.to_string();
+                                    Some((name, value))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    // 读分帧 body：Some(body)=正常；None=中止；Err=管道断。
+                    let body = match read_chunked_body(&mut reader) {
+                        Ok(b) => b,
+                        Err(_) => break,
+                    };
+                    let sender = inner.pending.lock().unwrap().remove(&id);
+                    if let Some(tx) = sender {
+                        match body {
+                            Some(body) => {
+                                let _ = tx.send(Ok(RpcOutcome { status, headers, body }));
+                            }
+                            None => {
+                                let _ = tx.send(Err("cancelled".into()));
+                            }
+                        }
+                    }
+                }
+                Some("aborted") => {
                     let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                     let sender = inner.pending.lock().unwrap().remove(&id);
                     if let Some(tx) = sender {
-                        if msg.get("t").and_then(|t| t.as_str()) == Some("aborted") {
-                            let _ = tx.send(Err("cancelled".into()));
-                        } else {
-                            let status = msg.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
-                            let headers = msg
-                                .get("headers")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|h| {
-                                            let name = h.get(0)?.as_str()?.to_string();
-                                            let value = h.get(1)?.as_str()?.to_string();
-                                            Some((name, value))
-                                        })
-                                        .collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default();
-                            let body_b64 = msg.get("bodyB64").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let _ = tx.send(Ok(RpcOutcome { status, headers, body_b64 }));
-                        }
+                        let _ = tx.send(Err("cancelled".into()));
                     }
                 }
                 Some("frame") => {
@@ -535,6 +557,26 @@ impl Sidecar {
             Self::schedule_auto_restart(app.clone(), inner.clone());
         }
     }
+
+/// 读取 response 的分帧 body：`[u32 大端长度][原始字节]` 重复，直到长度 0
+/// （正常结束）或 0xFFFFFFFF（中止）。返回 Some(body) / None（中止）。
+fn read_chunked_body(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Option<Vec<u8>>> {
+    let mut body = Vec::new();
+    loop {
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf)?;
+        let n = u32::from_be_bytes(len_buf);
+        if n == u32::MAX {
+            return Ok(None);
+        }
+        if n == 0 {
+            return Ok(Some(body));
+        }
+        let start = body.len();
+        body.resize(start + n as usize, 0);
+        reader.read_exact(&mut body[start..])?;
+    }
+}
 
     /// 延迟自动重启 sidecar（带崩溃循环保护）。
     fn schedule_auto_restart(app: AppHandle, inner: Arc<SidecarInner>) {

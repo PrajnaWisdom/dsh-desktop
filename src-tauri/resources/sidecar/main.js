@@ -9,7 +9,8 @@
 //         {"t":"unsubscribe","id":"s1"}
 //         {"t":"ping"}   {"t":"shutdown"}
 //   out:  {"t":"ready",...}
-//         {"t":"response","id":"f1","status":200,"headers":[["content-type","text/html"]],"bodyB64":"..."}
+//         {"t":"response","id":"f1","status":200,"headers":[["content-type","text/html"]]}
+//           + 分帧 body：[u32 大端长度][原始字节]... 以长度 0 结束（0xFFFFFFFF = 中止）
 //         {"t":"frame","id":"s1","frame":{type:"server-request",rpcId,method,payload}}
 //         {"t":"end","id":"s1"}
 //         {"t":"pong"}
@@ -47,12 +48,75 @@ const send = (msg) => {
   }
 };
 
+// ---- 二进制分帧（response 的 body 不再 base64，改为 4 字节长度前缀 + 原始字节块）----
+const escapeAscii = (text) => text.replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+
+function writeBodyChunk(buf) {
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32BE(buf.length, 0);
+  process.stdout.write(lenBuf);
+  if (buf.length > 0) process.stdout.write(buf);
+}
+
+// 结束标记：0 = 完整；0xFFFFFFFF = 中止/流错误（body 不完整）。
+function writeBodyEnd(aborted) {
+  const term = Buffer.alloc(4);
+  if (aborted) term.writeUInt32BE(0xffffffff, 0);
+  process.stdout.write(term);
+}
+
 const started = Date.now();
 let apiProxy;
 let sharedHandler = null;
 
 // ---- /api fetch handling ----
 const pendingFetches = new Map(); // id -> AbortController
+
+// 发送 response：先写一行 header，再流式写原始 body（JSON 响应转义成 ASCII，
+// 二进制响应原样透传），最后写结束标记。返回 body 总字节数。
+async function sendResponse(id, status, headers, response, isJson) {
+  send({ t: 'response', id, status, headers });
+  let total = 0;
+  let aborted = false;
+  try {
+    if (response && response.body) {
+      if (isJson) {
+        // TextDecoder 流式解码，跨 chunk 的多字节 UTF-8 字符不会错位。
+        const decoder = new TextDecoder('utf-8');
+        const reader = response.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = Buffer.from(escapeAscii(decoder.decode(value, { stream: true })), 'utf8');
+          total += chunk.length;
+          writeBodyChunk(chunk);
+        }
+        const tail = decoder.decode();
+        if (tail) {
+          const chunk = Buffer.from(escapeAscii(tail), 'utf8');
+          total += chunk.length;
+          writeBodyChunk(chunk);
+        }
+      } else {
+        const reader = response.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = Buffer.from(value);
+          total += chunk.length;
+          writeBodyChunk(chunk);
+        }
+      }
+    }
+  } catch (error) {
+    // body 流中途出错/中止：header 已发出，用中止标记收尾，避免污染后续消息。
+    aborted = true;
+    if (error?.name !== 'AbortError') log('body stream error', id, error?.message ?? error);
+  } finally {
+    writeBodyEnd(aborted);
+  }
+  return { total, aborted };
+}
 
 async function handleFetch(msg) {
   const { id, method = 'GET', url, headers = {}, body } = msg;
@@ -69,30 +133,24 @@ async function handleFetch(msg) {
     const response = await sharedHandler.fetch(request);
     const status = response.status;
     const responseHeaders = [...response.headers.entries()];
-    let buffer = Buffer.from(await response.arrayBuffer());
+    const ct = response.headers.get('content-type') || '';
     // WebView2 会忽略 content-type 的 charset，按系统 ANSI 码页（中文
     // Windows 为 GBK）解码响应，把 UTF-8 中文 JSON 读成乱码。在 sidecar 侧
     // 把 JSON 响应的非 ASCII 转义成 \uXXXX 使正文纯 ASCII，任何解码下
     // JSON.parse 都能还原中文（对 dsh_rpc 与 dsh:// 两条路径都生效）。
-    const ct = response.headers.get('content-type') || '';
-    if (/json/i.test(ct) && buffer.length > 0) {
-      const ascii = buffer.toString('utf8').replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
-      buffer = Buffer.from(ascii, 'utf8');
-    }
-    send({ t: 'response', id, status, headers: responseHeaders, bodyB64: buffer.toString('base64') });
-    log(`[diag] sent ${id} status=${status} ct=${(ct || '').slice(0, 48)} bytes=${buffer.length}`);
+    const { total, aborted } = await sendResponse(id, status, responseHeaders, response, /json/i.test(ct));
+    log(`[diag] sent ${id} status=${status} ct=${(ct || '').slice(0, 48)} bytes=${total}${aborted ? ' (aborted)' : ''}`);
   } catch (error) {
     if (error?.name === 'AbortError') {
+      // 仅在 fetch 尚未返回响应（header 未发出）时走这里；body 流中的中止
+      // 由 sendResponse 用中止标记收尾，不再发送 aborted 行。
       send({ t: 'aborted', id });
     } else {
       log('fetch error', id, url, error?.message ?? error);
-      send({
-        t: 'response',
-        id,
-        status: 500,
-        headers: [['content-type', 'text/plain; charset=utf-8']],
-        bodyB64: Buffer.from(String(error?.message ?? error)).toString('base64')
-      });
+      const text = String(error?.message ?? error);
+      send({ t: 'response', id, status: 500, headers: [['content-type', 'text/plain; charset=utf-8']] });
+      writeBodyChunk(Buffer.from(text, 'utf8'));
+      writeBodyEnd(false);
     }
   } finally {
     pendingFetches.delete(id);
