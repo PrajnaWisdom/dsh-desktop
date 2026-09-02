@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop"
-version = "0.4.18"
+version = "0.4.19"
 description = "DSH Desktop — 内嵌 DSH Web GUI 的 Windows 桌面客户端"
 authors = ["DSH Desktop Contributors"]
 edition = "2021"
