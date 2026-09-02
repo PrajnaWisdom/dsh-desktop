@@ -36,10 +36,28 @@ fn b64_encode(input: &[u8]) -> String {
     out
 }
 
-/// 通知窗口 HTML。title/body 经 JSON 转义注入，避免引号/XSS 问题。
+/// HTML 转义（防标题/正文里的 `<`、`&`、引号破坏页面结构）。
+fn html_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// 通知窗口 HTML：纯静态（无内联脚本），标题/正文经 HTML 转义直接嵌入。
+/// data URL 页面会被 Tauri 注入 CSP（DSH 的 script-src 'self' 无 unsafe-inline），
+/// 内联脚本会被拦截导致内容空白，因此这里不依赖任何脚本。
 fn notify_html(title: &str, body: &str) -> String {
-    let title_json = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
-    let body_json = serde_json::to_string(body).unwrap_or_else(|_| "\"\"".into());
+    let title = html_escape(title);
+    let body = html_escape(body);
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><style>
 html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#1b1f27;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;}}
@@ -49,8 +67,7 @@ html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:
 .content{{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:5px;}}
 .title{{color:#f5f7fa;font-size:14px;font-weight:600;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
 .body{{color:#a3adbb;font-size:13px;line-height:1.55;word-break:break-all;overflow:hidden;}}
-</style></head><body><div class="card"><div class="icon">🔔</div><div class="content"><div class="title" id="t"></div><div class="body" id="b"></div></div></div>
-<script>document.getElementById('t').textContent={title_json};document.getElementById('b').textContent={body_json};</script></body></html>"#
+</style></head><body><div class="card"><div class="icon">🔔</div><div class="content"><div class="title">{title}</div><div class="body">{body}</div></div></div></body></html>"#
     )
 }
 
