@@ -3,7 +3,11 @@
 //! `show_notification` 是前端可 invoke 的 Tauri 命令；`show_notification_inner`
 //! 是内部实现，后续 sidecar 协议若需要主动触发也可复用。
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tauri::{AppHandle, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindowBuilder};
+
+static NOTIFY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 简单 base64 编码（标准字母表 + 填充），用于构造 data URL。
 fn b64_encode(input: &[u8]) -> String {
@@ -52,19 +56,17 @@ html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:
 
 /// 弹出屏幕右下角置顶无边框通知窗口，8 秒后自动关闭。
 pub fn show_notification_inner(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
-    // 复用固定 label，先关闭上一则通知。
-    if let Some(existing) = app.get_webview_window("notify") {
-        let _ = existing.close();
-    }
+    let sequence = NOTIFY_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let label = format!("notify-{sequence}");
 
     let html = notify_html(title, body);
     let data_url = format!(
         "data:text/html;charset=utf-8;base64,{}",
         b64_encode(html.as_bytes())
     );
-    let url = tauri::Url::parse(&data_url).map_err(|e| e.to_string())?;
+    let url = tauri::Url::parse(&data_url).map_err(|e| format!("通知页面地址无效: {e}"))?;
 
-    let window = WebviewWindowBuilder::new(app, "notify", WebviewUrl::External(url))
+    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title("通知")
         .inner_size(380.0, 130.0)
         .decorations(false)
@@ -74,7 +76,7 @@ pub fn show_notification_inner(app: &AppHandle, title: &str, body: &str) -> Resu
         .shadow(false)
         .visible(false)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("创建通知窗口失败: {e}"))?;
 
     // 定位到当前屏（回退主屏）工作区右下角，避开任务栏。
     let monitor = window
@@ -92,13 +94,15 @@ pub fn show_notification_inner(app: &AppHandle, title: &str, body: &str) -> Resu
         let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
     }
 
-    let _ = window.show();
+    window
+        .show()
+        .map_err(|e| format!("显示通知窗口失败: {e}"))?;
 
     // 8 秒后自动关闭。
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(8));
-        if let Some(w) = app.get_webview_window("notify") {
+        if let Some(w) = app.get_webview_window(&label) {
             let _ = w.close();
         }
     });
