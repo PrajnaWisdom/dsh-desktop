@@ -38,11 +38,14 @@ fn notify_html(title: &str, body: &str) -> String {
     let body_json = serde_json::to_string(body).unwrap_or_else(|_| "\"\"".into());
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><style>
-html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#1e2228;}}
-.box{{width:100%;height:100%;box-sizing:border-box;padding:16px 18px;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;display:flex;flex-direction:column;justify-content:center;}}
-.title{{color:#fff;font-size:14px;font-weight:600;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
-.body{{color:#c9cdd3;font-size:13px;line-height:1.5;word-break:break-all;overflow:hidden;}}
-</style></head><body><div class="box"><div class="title" id="t"></div><div class="body" id="b"></div></div>
+html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#1b1f27;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;}}
+.card{{width:100%;height:100%;box-sizing:border-box;display:flex;align-items:center;gap:14px;padding:18px 20px 18px 24px;position:relative;}}
+.card::before{{content:'';position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:3px;background:linear-gradient(180deg,#3b82f6,#8b5cf6);}}
+.icon{{flex:none;width:40px;height:40px;border-radius:10px;background:rgba(59,130,246,.14);border:1px solid rgba(59,130,246,.28);display:flex;align-items:center;justify-content:center;font-size:19px;}}
+.content{{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:5px;}}
+.title{{color:#f5f7fa;font-size:14px;font-weight:600;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.body{{color:#a3adbb;font-size:13px;line-height:1.55;word-break:break-all;overflow:hidden;}}
+</style></head><body><div class="card"><div class="icon">🔔</div><div class="content"><div class="title" id="t"></div><div class="body" id="b"></div></div></div>
 <script>document.getElementById('t').textContent={title_json};document.getElementById('b').textContent={body_json};</script></body></html>"#
     )
 }

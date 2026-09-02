@@ -198,12 +198,39 @@ fn open_sidecar_log(app: AppHandle) -> Result<(), String> {
 }
 
 /// 重启整个桌面应用（含窗口与内置 DSH sidecar）。
-/// 用 async + `app.restart()`：命令在非主线程执行，restart() 走 request_exit
-/// 事件循环，触发完整 ExitRequested/Exit 清理（single-instance 锁随之释放），
-/// 避免新进程被 single-instance 误判为重复实例而立即退出。
+/// 手动实现，绕开 Tauri 原生 restart 与 single-instance 锁的时序竞态：
+/// 先用独立 cmd 进程安排约 1 秒后拉起新进程，再走 Tauri 正常退出
+/// （Exit 事件会 stop sidecar 并释放 single-instance 锁），确保旧进程
+/// 完全退出后新进程才启动，不会被误判为重复实例。
 #[tauri::command]
-async fn restart_app(app: AppHandle) {
-    app.restart();
+fn restart_app(app: AppHandle) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("获取当前程序路径失败: {e}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        // ping 自环回两次 ≈ 1 秒延迟；start "" 用空标题 + 引号路径。
+        let cmd = format!(
+            "ping -n 2 127.0.0.1 >nul & start \"\" \"{}\"",
+            exe.display()
+        );
+        std::process::Command::new("cmd")
+            .args(["/C", &cmd])
+            .spawn()
+            .map_err(|e| format!("安排延迟重启失败: {e}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let cmd = format!("sleep 1; exec \"{}\"", exe.display());
+        std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .spawn()
+            .map_err(|e| format!("安排延迟重启失败: {e}"))?;
+    }
+
+    // 触发 Tauri 正常退出（Exit 事件：stop sidecar + 释放 single-instance 锁）
+    app.exit(0);
+
+    Ok(())
 }
 
 // ---------- 托盘 ----------
