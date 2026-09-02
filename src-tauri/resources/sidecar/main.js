@@ -33,7 +33,19 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   try { process.on(sig, () => { try { process.stderr.write(`[diag] signal ${sig}\n`); } catch {} }); } catch {}
 }
 
-const send = (msg) => { process.stdout.write(`${JSON.stringify(msg)}\n`); };
+// Windows 上对管道做超大单次写入可能阻塞事件循环（大响应如 session.history
+// 可达数 MB，base64 后更大）。协议按 \n 分行、Rust 侧按行读取，分块写入透明。
+const send = (msg) => {
+  const line = `${JSON.stringify(msg)}\n`;
+  const CHUNK = 256 * 1024;
+  if (line.length <= CHUNK) {
+    process.stdout.write(line);
+    return;
+  }
+  for (let i = 0; i < line.length; i += CHUNK) {
+    process.stdout.write(line.slice(i, i + CHUNK));
+  }
+};
 
 const started = Date.now();
 let apiProxy;
@@ -55,11 +67,9 @@ async function handleFetch(msg) {
       signal: controller.signal
     });
     const response = await sharedHandler.fetch(request);
-    log(`[diag] ${id} fetch-done status=${response.status}`);
     const status = response.status;
     const responseHeaders = [...response.headers.entries()];
     let buffer = Buffer.from(await response.arrayBuffer());
-    log(`[diag] ${id} arrayBuffer bytes=${buffer.length}`);
     // WebView2 会忽略 content-type 的 charset，按系统 ANSI 码页（中文
     // Windows 为 GBK）解码响应，把 UTF-8 中文 JSON 读成乱码。在 sidecar 侧
     // 把 JSON 响应的非 ASCII 转义成 \uXXXX 使正文纯 ASCII，任何解码下
@@ -69,7 +79,6 @@ async function handleFetch(msg) {
       const ascii = buffer.toString('utf8').replace(/[\u0080-\uffff]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
       buffer = Buffer.from(ascii, 'utf8');
     }
-    log(`[diag] ${id} escape bytes=${buffer.length}`);
     send({ t: 'response', id, status, headers: responseHeaders, bodyB64: buffer.toString('base64') });
     log(`[diag] sent ${id} status=${status} ct=${(ct || '').slice(0, 48)} bytes=${buffer.length}`);
   } catch (error) {
