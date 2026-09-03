@@ -496,7 +496,7 @@ impl Sidecar {
                         })
                         .unwrap_or_default();
                     // 读分帧 body：Some(body)=正常；None=中止；Err=管道断。
-                    let body = match read_chunked_body(&mut reader) {
+                    let body = match Self::read_chunked_body(&mut reader) {
                         Ok(b) => b,
                         Err(_) => break,
                     };
