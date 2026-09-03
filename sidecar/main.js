@@ -65,6 +65,19 @@ function writeBodyEnd(aborted) {
   process.stdout.write(term);
 }
 
+// ---- 串行化 stdout 协议写 ----
+// stdout 是单一字节流：response 的 body 按 chunk 流式写、且 chunk 之间有 await 间隙，
+// 若两个响应（或响应与下行 frame）并发写，字节会交错，Rust 侧的长度前缀分帧就会读乱
+// （表现为挂起 + 客户端 "signal timed out"）。所有多段协议写都串行化到一条队列，
+// 保证每条消息（header 行 + 分帧 body + 结束标记）原子写完。
+let writeChain = Promise.resolve();
+
+function serialize(fn) {
+  const run = writeChain.then(fn, fn);
+  writeChain = run.then(() => {}, () => {});
+  return run;
+}
+
 const started = Date.now();
 let apiProxy;
 let sharedHandler = null;
@@ -75,46 +88,48 @@ const pendingFetches = new Map(); // id -> AbortController
 // 发送 response：先写一行 header，再流式写原始 body（JSON 响应转义成 ASCII，
 // 二进制响应原样透传），最后写结束标记。返回 body 总字节数。
 async function sendResponse(id, status, headers, response, isJson) {
-  send({ t: 'response', id, status, headers });
   let total = 0;
   let aborted = false;
-  try {
-    if (response && response.body) {
-      if (isJson) {
-        // TextDecoder 流式解码，跨 chunk 的多字节 UTF-8 字符不会错位。
-        const decoder = new TextDecoder('utf-8');
-        const reader = response.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = Buffer.from(escapeAscii(decoder.decode(value, { stream: true })), 'utf8');
-          total += chunk.length;
-          writeBodyChunk(chunk);
-        }
-        const tail = decoder.decode();
-        if (tail) {
-          const chunk = Buffer.from(escapeAscii(tail), 'utf8');
-          total += chunk.length;
-          writeBodyChunk(chunk);
-        }
-      } else {
-        const reader = response.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = Buffer.from(value);
-          total += chunk.length;
-          writeBodyChunk(chunk);
+  await serialize(async () => {
+    send({ t: 'response', id, status, headers });
+    try {
+      if (response && response.body) {
+        if (isJson) {
+          // TextDecoder 流式解码，跨 chunk 的多字节 UTF-8 字符不会错位。
+          const decoder = new TextDecoder('utf-8');
+          const reader = response.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = Buffer.from(escapeAscii(decoder.decode(value, { stream: true })), 'utf8');
+            total += chunk.length;
+            writeBodyChunk(chunk);
+          }
+          const tail = decoder.decode();
+          if (tail) {
+            const chunk = Buffer.from(escapeAscii(tail), 'utf8');
+            total += chunk.length;
+            writeBodyChunk(chunk);
+          }
+        } else {
+          const reader = response.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = Buffer.from(value);
+            total += chunk.length;
+            writeBodyChunk(chunk);
+          }
         }
       }
+    } catch (error) {
+      // body 流中途出错/中止：header 已发出，用中止标记收尾，避免污染后续消息。
+      aborted = true;
+      if (error?.name !== 'AbortError') log('body stream error', id, error?.message ?? error);
+    } finally {
+      writeBodyEnd(aborted);
     }
-  } catch (error) {
-    // body 流中途出错/中止：header 已发出，用中止标记收尾，避免污染后续消息。
-    aborted = true;
-    if (error?.name !== 'AbortError') log('body stream error', id, error?.message ?? error);
-  } finally {
-    writeBodyEnd(aborted);
-  }
+  });
   return { total, aborted };
 }
 
@@ -144,13 +159,15 @@ async function handleFetch(msg) {
     if (error?.name === 'AbortError') {
       // 仅在 fetch 尚未返回响应（header 未发出）时走这里；body 流中的中止
       // 由 sendResponse 用中止标记收尾，不再发送 aborted 行。
-      send({ t: 'aborted', id });
+      serialize(() => { send({ t: 'aborted', id }); });
     } else {
       log('fetch error', id, url, error?.message ?? error);
       const text = String(error?.message ?? error);
-      send({ t: 'response', id, status: 500, headers: [['content-type', 'text/plain; charset=utf-8']] });
-      writeBodyChunk(Buffer.from(text, 'utf8'));
-      writeBodyEnd(false);
+      void serialize(async () => {
+        send({ t: 'response', id, status: 500, headers: [['content-type', 'text/plain; charset=utf-8']] });
+        writeBodyChunk(Buffer.from(text, 'utf8'));
+        writeBodyEnd(false);
+      });
     }
   } finally {
     pendingFetches.delete(id);
@@ -174,12 +191,12 @@ function openStream(stream, subId) {
   (async () => {
     try {
       for await (const frame of iterator) {
-        send({ t: 'frame', id: subId, frame: serverRequest(frame) });
+        serialize(() => { send({ t: 'frame', id: subId, frame: serverRequest(frame) }); });
       }
     } catch (error) {
       if (error?.name !== 'AbortError') log('stream error', stream, subId, error?.message ?? error);
     } finally {
-      if (subscriptions.delete(subId)) send({ t: 'end', id: subId });
+      if (subscriptions.delete(subId)) serialize(() => { send({ t: 'end', id: subId }); });
     }
   })();
 }
