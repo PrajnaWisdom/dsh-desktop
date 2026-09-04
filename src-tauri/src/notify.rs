@@ -2,6 +2,12 @@
 //!
 //! `show_notification` 是前端可 invoke 的 Tauri 命令；`show_notification_inner`
 //! 是内部实现，后续 sidecar 协议若需要主动触发也可复用。
+//!
+//! 内容页不再使用 `data:` URL：WebView2/Chromium 默认禁止顶层导航到 `data:`，
+//! 通知窗口因此只会弹出一个空白框（内联脚本、静态 HTML 都与空白无关）。现在
+//! 由前端把「插件 host 提供的 http 页面地址」（/api/dsh-notify/popup?title=&body=，
+//! 与应用同源）作为 `url` 传入，窗口直接加载真实 http 页面即可正常渲染内容。
+//! 未传 `url` 时保留旧的 `data:` 回退路径（旧客户端兼容）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -9,7 +15,7 @@ use tauri::{AppHandle, Manager, PhysicalPosition, Position, WebviewUrl, WebviewW
 
 static NOTIFY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// 简单 base64 编码（标准字母表 + 填充），用于构造 data URL。
+/// 简单 base64 编码（标准字母表 + 填充），用于构造 data URL（仅旧回退路径使用）。
 fn b64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -52,9 +58,7 @@ fn html_escape(input: &str) -> String {
     out
 }
 
-/// 通知窗口 HTML：纯静态（无内联脚本），标题/正文经 HTML 转义直接嵌入。
-/// data URL 页面会被 Tauri 注入 CSP（DSH 的 script-src 'self' 无 unsafe-inline），
-/// 内联脚本会被拦截导致内容空白，因此这里不依赖任何脚本。
+/// 旧回退路径的通知 HTML（data URL 使用）。仅当未提供 `url` 时才会走到这里。
 fn notify_html(title: &str, body: &str) -> String {
     let title = html_escape(title);
     let body = html_escape(body);
@@ -71,19 +75,12 @@ html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:
     )
 }
 
-/// 弹出屏幕右下角置顶无边框通知窗口，8 秒后自动关闭。
-pub fn show_notification_inner(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+/// 弹出屏幕右下角置顶无边框通知窗口，8 秒后自动关闭。`target` 为窗口内容页。
+fn open_notify_window(app: &AppHandle, target: WebviewUrl) -> Result<(), String> {
     let sequence = NOTIFY_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
     let label = format!("notify-{sequence}");
 
-    let html = notify_html(title, body);
-    let data_url = format!(
-        "data:text/html;charset=utf-8;base64,{}",
-        b64_encode(html.as_bytes())
-    );
-    let url = tauri::Url::parse(&data_url).map_err(|e| format!("通知页面地址无效: {e}"))?;
-
-    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+    let window = WebviewWindowBuilder::new(app, &label, target)
         .title("通知")
         .inner_size(380.0, 130.0)
         .decorations(false)
@@ -127,14 +124,43 @@ pub fn show_notification_inner(app: &AppHandle, title: &str, body: &str) -> Resu
     Ok(())
 }
 
+/// 旧签名路径：用标题/正文拼 `data:` 页面再开窗。仅供未传 `url` 的调用方兼容。
+pub fn show_notification_inner(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+    let html = notify_html(title, body);
+    let data_url = format!(
+        "data:text/html;charset=utf-8;base64,{}",
+        b64_encode(html.as_bytes())
+    );
+    let url = tauri::Url::parse(&data_url).map_err(|e| format!("通知页面地址无效: {e}"))?;
+    open_notify_window(app, WebviewUrl::External(url))
+}
+
 /// 前端可 invoke 的 Tauri 命令。
 /// 必须是 async：Tauri 的异步命令跑在后台线程上，而 `WebviewWindowBuilder::build()`
 /// 内部会「run_on_main_thread + 阻塞等待」。若在同步命令（主线程）里调用，主线程会卡在
 /// 等待里、被调度到主线程的建窗闭包永远跑不起来，从而死锁——这就是「测试通知」卡死的根因。
 /// 放到 spawn_blocking 里让建窗在主线程空闲时完成，返回时不阻塞主线程。
+///
+/// 参数：`url`（推荐）为通知内容页地址（http，与应用同源，由 dsh-notify host 提供）；
+/// 未提供 `url` 时退回用 `title`/`body` 拼 `data:` 页面（旧客户端兼容）。
 #[tauri::command]
-pub async fn show_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || show_notification_inner(&app, &title, &body))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn show_notification(
+    app: AppHandle,
+    url: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || match url {
+        Some(url) => {
+            let parsed = tauri::Url::parse(&url).map_err(|e| format!("通知页面地址无效: {e}"))?;
+            open_notify_window(&app, WebviewUrl::External(parsed))
+        }
+        None => {
+            let title = title.unwrap_or_default();
+            let body = body.unwrap_or_default();
+            show_notification_inner(&app, &title, &body)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
