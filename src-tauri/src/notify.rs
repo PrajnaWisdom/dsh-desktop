@@ -128,7 +128,13 @@ pub fn show_notification_inner(app: &AppHandle, title: &str, body: &str) -> Resu
 }
 
 /// 前端可 invoke 的 Tauri 命令。
+/// 必须是 async：Tauri 的异步命令跑在后台线程上，而 `WebviewWindowBuilder::build()`
+/// 内部会「run_on_main_thread + 阻塞等待」。若在同步命令（主线程）里调用，主线程会卡在
+/// 等待里、被调度到主线程的建窗闭包永远跑不起来，从而死锁——这就是「测试通知」卡死的根因。
+/// 放到 spawn_blocking 里让建窗在主线程空闲时完成，返回时不阻塞主线程。
 #[tauri::command]
-pub fn show_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
-    show_notification_inner(&app, &title, &body)
+pub async fn show_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || show_notification_inner(&app, &title, &body))
+        .await
+        .map_err(|e| e.to_string())?
 }
