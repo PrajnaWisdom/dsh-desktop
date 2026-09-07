@@ -11,6 +11,7 @@
 // it.
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 export const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -49,16 +50,23 @@ export async function bootSidecar() {
   // then mirrors the full dependency closure (scoped AND unscoped deps such as
   // `schemastery`) into `$DSH_HOME/profiles/node_modules` for the Loader and
   // the in-box `@dsh-desktop/*` plugins.
-  const scopeDir = dirname(dirname(INSTALL_ANCHOR)); // <install>/node_modules/@deepseek-ai
+  // Resolve the install's boot modules through Node's own resolution, anchored
+  // at the dsh package, so BOTH npm's nested layout
+  // (`node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/...`) and a flat
+  // hoisted layout (`node_modules/@deepseek-ai/...`) work. Hardcoding a flat
+  // `scopeDir/<pkg>/lib/index.js` path broke fresh `npm install`s, where these
+  // deps nest under `dsh/node_modules`.
+  const requireFromInstall = createRequire(INSTALL_ANCHOR);
+  const resolveInstall = (spec) => requireFromInstall.resolve(spec);
   const [
     { boot, loadProfile, healProfilesModuleFallback, composeEntries, loadLayeredEnv },
     { provideCmdline },
     { DSH_LAUNCH_ENVIRONMENT_KEY },
     { StdioWebServer }
   ] = await Promise.all([
-    import(pathToFileURL(join(scopeDir, 'dsh-app-boot', 'lib', 'index.js')).href),
-    import(pathToFileURL(join(scopeDir, 'dsh-cmdline', 'lib', 'index.js')).href),
-    import(pathToFileURL(join(scopeDir, 'dsh-launch-environment', 'lib', 'index.js')).href),
+    import(pathToFileURL(resolveInstall('@deepseek-ai/dsh-app-boot')).href),
+    import(pathToFileURL(resolveInstall('@deepseek-ai/dsh-cmdline')).href),
+    import(pathToFileURL(resolveInstall('@deepseek-ai/dsh-launch-environment')).href),
     import('./carrier.js'),
   ]);
 
