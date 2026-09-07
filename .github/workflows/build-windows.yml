@@ -19,6 +19,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,7 +81,24 @@ jobs:
         run: npm ci
 
       - name: Build and bundle (Tauri, embeds Node + DSH)
-        run: npm run tauri build
+        id: build
+        shell: pwsh
+        run: |
+          npm run tauri build 2>&1 | Tee-Object -FilePath build-step.log
+          exit $LASTEXITCODE
+
+      - name: Report build failure (diagnostic)
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $content = (Get-Content -Path build-step.log -Tail 200 -ErrorAction SilentlyContinue) -join "`n"
+          if (-not $content) { $content = "(no log captured)" }
+          $body = "CI run [${{ github.run_id }}](https://github.com/PrajnaWisdom/dsh-desktop/actions/runs/${{ github.run_id }}) tag `${{ github.ref_name }} failed at step **Build and bundle**.`n`n``````text`n" + $content + "`n``````"
+          $json = @{ title = "[CI] " + "${{ github.ref_name }}" + " build failed"; body = $body } | ConvertTo-Json
+          $json | Out-File -FilePath issue.json -Encoding utf8
+          gh api --method POST repos/PrajnaWisdom/dsh-desktop/issues --input issue.json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
