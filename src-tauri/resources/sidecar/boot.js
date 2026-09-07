@@ -10,7 +10,7 @@
 // both the stdio protocol loop (main.js) and the in-process self-test can use
 // it.
 
-import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, readdirSync, rmSync, rmdirSync, lstatSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -33,6 +33,48 @@ export const INSTALL_ANCHOR = argValue('--anchor') ?? join(PROFILES_NODE_MODULES
 process.env.DSH_HOME = DSH_HOME;
 
 export const CSP_META = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\' data:; connect-src \'self\'; worker-src \'self\' blob:; object-src \'none\'; base-uri \'self\'; form-action \'self\'">';
+
+/**
+ * Remove stale install-fallback entries under `$DSH_HOME/profiles/node_modules`
+ * before `healProfilesModuleFallback` runs. A previous dsh generation (0.1.1)
+ * materialized `@deepseek-ai` as ONE whole-scope junction (and some transitive
+ * scoped deps as real directories), while 0.1.2-rc.1 creates ONE junction per
+ * package. Those stale entries make `ensureSymlink` throw
+ * "exists and is not a symlink or dsh-managed module proxy".
+ *
+ * We keep `@dsh-desktop` (the desktop's own sidecar + plugins, installed by
+ * install_sidecar); everything else is re-created by the heal as junctions.
+ * Junctions/symlinks are removed as links — never followed into their target.
+ */
+function cleanStaleFallback(modulesDir) {
+  let names;
+  try {
+    names = readdirSync(modulesDir);
+  } catch {
+    return;
+  }
+  // Safety guard: only the home's fallback node_modules (which always contains
+  // the desktop's own @dsh-desktop scope) is eligible. Refuse to touch anything
+  // else — e.g. a repo root when running the in-repo self-test.
+  if (!names.includes('@dsh-desktop')) return;
+  for (const name of names) {
+    if (name === '@dsh-desktop') continue;
+    const full = join(modulesDir, name);
+    try {
+      const st = lstatSync(full);
+      if (st.isSymbolicLink()) {
+        // junction / dir symlink: remove the link, not the target
+        rmdirSync(full);
+      } else if (st.isDirectory()) {
+        rmSync(full, { recursive: true, force: true });
+      } else {
+        unlinkSync(full);
+      }
+    } catch {
+      // best-effort: the heal will surface any real conflict
+    }
+  }
+}
 
 /**
  * Boot the web profile and wire the /api handler, stream sources and the
@@ -81,6 +123,7 @@ export async function bootSidecar() {
   // 0.1.2-rc.1 fallback healing: mirror the install's dependency closure into
   // the home's flat node_modules (the Loader and every plugin — including the
   // desktop's own @dsh-desktop/* — resolve their imports from here).
+  cleanStaleFallback(join(DSH_HOME, 'profiles', 'node_modules'));
   await healProfilesModuleFallback({ installAnchor: INSTALL_ANCHOR, profile, home: DSH_HOME });
 
   // The root config file is the Loader include anchor; the CLI initializes it
