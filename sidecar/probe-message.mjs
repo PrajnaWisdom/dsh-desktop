@@ -6,7 +6,7 @@
 import { bootSidecar, log } from './boot.js';
 
 const handle = await bootSidecar();
-const { carrier, apiProxy } = handle;
+const { carrier, typertGateway } = handle;
 
 async function rpc(method, payload) {
   const msg = { type: 'client-request', rpcId: crypto.randomUUID(), method, payload };
@@ -19,26 +19,26 @@ async function rpc(method, payload) {
   return { status: response.status, text };
 }
 
-const created = await rpc('session.create', {});
+const created = await rpc('session/create', {});
 log('session.create ->', created.status);
 const sessionId = created.status === 200 ? JSON.parse(created.text).result.value.sessionId : null;
 log('sessionId:', sessionId);
 
-// Open the mux downlink BEFORE prompting so we catch the whole turn.
+// Open the $events downlink BEFORE prompting so we catch the whole turn.
 const frames = [];
 const controller = new AbortController();
-const iterator = apiProxy.events.mux({ rpcId: 'probe-message', payload: {} }, controller.signal);
+const iterator = typertGateway.wireStream.open('$events', { args: {} }, controller.signal);
 const pump = (async () => {
   for await (const frame of iterator) {
-    const t = frame?.payload?.type ?? frame?.payload?.kind ?? frame?.method;
+    const t = frame?.event ?? frame?.type;
     frames.push(t);
-    log('MUX', t, JSON.stringify(frame?.payload?.payload ?? frame?.payload ?? {}).slice(0, 300));
+    log('EVENT', t, JSON.stringify(frame?.args ?? frame ?? {}).slice(0, 300));
   }
 })();
 
 await new Promise((resolve) => setTimeout(resolve, 500));
 if (sessionId) {
-  const prompt = await rpc('session.prompt', {
+  const prompt = await rpc('session/prompt', {
     sessionId,
     mode: 'queue',
     content: [{ type: 'text', text: '请使用工具列出当前工作目录的文件，然后用一句话回复你看到了哪些文件。' }]

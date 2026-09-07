@@ -1,11 +1,20 @@
 // @dsh-desktop/sidecar — bridge-client.js
 // Route C client-side transport bridge. Served by the sidecar at
 // /__dsh-bridge.js and injected into the dsh web frontend's index.html, it
-// makes the rc.8 browser transport (WebApiClient's globalThis.fetch + new
-// WebSocket against same-origin /api URLs) ride Tauri IPC to the sidecar
-// instead of HTTP/WebSocket. It only installs itself inside the Tauri
-// WebView (window.__TAURI_INTERNALS__ present); a plain-browser preview of
-// the GUI is unaffected.
+// makes the web transport ride Tauri IPC to the sidecar instead of HTTP /
+// WebSocket.
+//
+// DSH 0.1.2-rc.1 reads `globalThis.__DSH_TRANSPORT__` (a first-class embedding
+// hook: `fetch`, `openStream`, `ownsHost`) from the client-connection plugin.
+// We provide that hook — `fetch` carries the /api unary RPC channel, and
+// `openStream` carries the Typert live streams ($events / session/control /
+// session/follow / workspace/follow) through the sidecar stdio protocol. We
+// also keep patching `window.fetch` for any other /api/* HTTP route (e.g. the
+// notification host) that still uses plain browser fetch.
+//
+// It only installs itself inside the Tauri WebView
+// (window.__TAURI_INTERNALS__ present); a plain-browser preview of the GUI is
+// unaffected.
 (function () {
   'use strict';
 
@@ -57,42 +66,8 @@
     return out;
   }
 
-  // ---- patch fetch: /api rides the sidecar bridge ----
-  var realFetch = window.fetch.bind(window);
+  // ---- /api fetch -> sidecar stdio RPC ----
   var bridgeCounter = 0;
-
-  window.fetch = function (input, init) {
-    var isString = typeof input === 'string';
-    var urlValue = isString ? input : (input && input.url) || '';
-    if (!isApiUrl(urlValue)) return realFetch(input, init);
-
-    var url = new URL(urlValue, window.location.href);
-    var method = ((init && init.method) || (isString ? 'GET' : (input && input.method) || 'GET') || 'GET').toUpperCase();
-
-    var headers = {};
-    var h = (init && init.headers) || (!isString && input && input.headers) || undefined;
-    if (h) {
-      if (typeof Headers !== 'undefined' && h instanceof Headers) {
-        h.forEach(function (value, name) { headers[name] = value; });
-      } else if (Array.isArray(h)) {
-        for (var i = 0; i < h.length; i++) headers[h[i][0]] = h[i][1];
-      } else {
-        for (var key in h) if (Object.prototype.hasOwnProperty.call(h, key)) headers[key] = h[key];
-      }
-    }
-
-    var body = null;
-    if (init && init.body != null) {
-      body = typeof init.body === 'string' ? init.body : (typeof init.body === 'object' && init.body !== null && typeof init.body.text === 'function' ? null : String(init.body));
-      // Stream/Blob bodies are rare on /api; fall back to consuming them.
-      if (body === null && init.body && typeof init.body.text === 'function') {
-        return init.body.text().then(function (text) {
-          return bridgeFetch(url, method, headers, text, init && init.signal);
-        });
-      }
-    }
-    return bridgeFetch(url, method, headers, body, init && init.signal);
-  };
 
   function bridgeFetch(url, method, headers, body, signal) {
     var id = 'f' + (++bridgeCounter);
@@ -149,116 +124,139 @@
     });
   }
 
-  // ---- patch WebSocket: /api/events.{mux,host} ride the sidecar streams ----
-  var RealWebSocket = window.WebSocket;
-  var subCounter = 0;
+  // Resolve a fetch input (string | URL | Request) into { url, method, headers,
+  // body } and, when it is a /api URL, bridge it; otherwise hand it to the real
+  // fetch. This is the shared implementation behind both `window.fetch` and the
+  // `__DSH_TRANSPORT__.fetch` hook.
+  function resolveFetch(input, init) {
+    var isString = typeof input === 'string';
+    var urlValue = isString ? input : (input && input.url) || '';
+    if (!isApiUrl(urlValue)) return null; // caller falls back to realFetch
 
-  function BridgeWebSocket(url) {
-    this.url = String(url);
-    this.readyState = 0; // CONNECTING
-    this.binaryType = 'blob';
-    this.extensions = '';
-    this.protocol = '';
-    this.bufferedAmount = 0;
+    var url = new URL(urlValue, window.location.href);
+    var method = ((init && init.method) || (isString ? 'GET' : (input && input.method) || 'GET') || 'GET').toUpperCase();
 
-    var self = this;
-    this._listeners = { open: [], message: [], close: [], error: [] };
-    this._subId = 's' + (++subCounter);
-    this._path = new URL(this.url, window.location.href).pathname;
-    this._stream = /events\.host$/.test(this._path) ? 'host' : 'mux';
+    var headers = {};
+    var h = (init && init.headers) || (!isString && input && input.headers) || undefined;
+    if (h) {
+      if (typeof Headers !== 'undefined' && h instanceof Headers) {
+        h.forEach(function (value, name) { headers[name] = value; });
+      } else if (Array.isArray(h)) {
+        for (var i = 0; i < h.length; i++) headers[h[i][0]] = h[i][1];
+      } else {
+        for (var key in h) if (Object.prototype.hasOwnProperty.call(h, key)) headers[key] = h[key];
+      }
+    }
 
-    this._emit = function (type, event) {
-      var list = self._listeners[type] || [];
-      for (var i = 0; i < list.length; i++) list[i].call(self, event);
-    };
-
-    this._unlisten = null;
-    var frameListener = function (e) {
-      var payload = e && e.payload;
-      if (!payload || payload.subId !== self._subId) return;
-      var envelope = payload.frame;
-      self._emit('message', { data: JSON.stringify(envelope), origin: self.url, source: null });
-    };
-    var endListener = function (e) {
-      var payload = e && e.payload;
-      if (!payload || payload.subId !== self._subId) return;
-      self.readyState = 3; // CLOSED
-      self._emit('close', { code: 1000, reason: '', wasClean: true });
-    };
-
-    var opened = false;
-    invoke('dsh_subscribe', { stream: this._stream, subId: this._subId })
-      .then(function () {
-        return Promise.all([
-          listen('dsh-frame', frameListener),
-          listen('dsh-stream-end', endListener)
-        ]);
-      })
-      .then(function (unlisteners) {
-        self._unlisten = unlisteners;
-        opened = true;
-        self.readyState = 1; // OPEN
-        self._emit('open', {});
-      })
-      .catch(function (err) {
-        self.readyState = 3; // CLOSED
-        self._emit('error', { error: err, message: String(err && err.message || err) });
-        self._emit('close', { code: 1006, reason: String(err && err.message || err), wasClean: false });
-      });
+    var body = null;
+    if (init && init.body != null) {
+      body = typeof init.body === 'string' ? init.body : (typeof init.body === 'object' && init.body !== null && typeof init.body.text === 'function' ? null : String(init.body));
+      // Stream/Blob bodies are rare on /api; fall back to consuming them.
+      if (body === null && init.body && typeof init.body.text === 'function') {
+        return init.body.text().then(function (text) {
+          return bridgeFetch(url, method, headers, text, init && init.signal);
+        });
+      }
+    }
+    return bridgeFetch(url, method, headers, body, init && init.signal);
   }
 
-  BridgeWebSocket.CONNECTING = 0;
-  BridgeWebSocket.OPEN = 1;
-  BridgeWebSocket.CLOSING = 2;
-  BridgeWebSocket.CLOSED = 3;
-  BridgeWebSocket.prototype.CONNECTING = 0;
-  BridgeWebSocket.prototype.OPEN = 1;
-  BridgeWebSocket.prototype.CLOSING = 2;
-  BridgeWebSocket.prototype.CLOSED = 3;
-
-  BridgeWebSocket.prototype.addEventListener = function (type, listener) {
-    if (!this._listeners[type]) this._listeners[type] = [];
-    this._listeners[type].push(listener);
-  };
-  BridgeWebSocket.prototype.removeEventListener = function (type, listener) {
-    var list = this._listeners[type];
-    if (!list) return;
-    var idx = list.indexOf(listener);
-    if (idx >= 0) list.splice(idx, 1);
-  };
-  BridgeWebSocket.prototype.send = function () {
-    // Downlink-only; the client never sends on the event sockets.
-  };
-  BridgeWebSocket.prototype.close = function () {
-    if (this.readyState === 3) return;
-    var self = this;
-    this.readyState = 3;
-    if (this._unlisten) {
-      var u = this._unlisten;
-      this._unlisten = null;
-      u.forEach(function (fn) { fn && fn().catch(function () {}); });
-    }
-    invoke('dsh_unsubscribe', { subId: this._subId }).catch(function () {});
-    this._emit('close', { code: 1000, reason: '', wasClean: true });
+  var realFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    var bridged = resolveFetch(input, init);
+    return bridged === null ? realFetch(input, init) : bridged;
   };
 
-  window.WebSocket = function (url, protocols) {
-    var target = String(url);
-    if (isApiUrl(target) && /\/api\/events\.(mux|host)(\?|$)/.test(new URL(target, window.location.href).pathname)) {
-      return new BridgeWebSocket(target);
+  // ---- downlink streams -> sidecar stdio subscribe ----
+  var subCounter = 0;
+
+  // Open one Typert live stream through the sidecar protocol. Returns an async
+  // iterable of the raw stream items the gateway yields (e.g. for $events:
+  // {type:'ready',...} then {type:'emit'|'waterfall'|'cancel',...}).
+  async function* openStream(endpoint, payload, signal) {
+    var subId = 's' + (++subCounter);
+    var queue = [];
+    var resolvers = [];
+    var ended = false;
+    var aborted = false;
+    var unlisteners = null;
+
+    function pump() {
+      while (resolvers.length && (queue.length > 0 || ended)) {
+        resolvers.shift()();
+      }
     }
-    // Fall back to the real implementation for anything else.
-    return protocols !== undefined ? new RealWebSocket(target, protocols) : new RealWebSocket(target);
+
+    var frameListener = function (e) {
+      var p = e && e.payload;
+      if (!p || p.subId !== subId) return;
+      queue.push(p.frame);
+      pump();
+    };
+    var endListener = function (e) {
+      var p = e && e.payload;
+      if (!p || p.subId !== subId) return;
+      ended = true;
+      pump();
+    };
+
+    function unsubscribe() {
+      invoke('dsh_unsubscribe', { subId: subId }).catch(function () {});
+      if (unlisteners) {
+        var u = unlisteners;
+        unlisteners = null;
+        u.forEach(function (fn) { fn && fn().catch(function () {}); });
+      }
+    }
+
+    var onAbort = function () {
+      aborted = true;
+      ended = true;
+      unsubscribe();
+      pump();
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    try {
+      await invoke('dsh_subscribe', { endpoint: endpoint, payload: payload, subId: subId });
+      unlisteners = await Promise.all([
+        listen('dsh-frame', frameListener),
+        listen('dsh-stream-end', endListener)
+      ]);
+      while (true) {
+        while (queue.length > 0) yield queue.shift();
+        if (ended) {
+          if (aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+          break;
+        }
+        await new Promise(function (resolve) { resolvers.push(resolve); });
+      }
+    } finally {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      unsubscribe();
+    }
+  }
+
+  // The first-class embedding hook the client-connection plugin reads at load.
+  // ownsHost:true marks the transport as loopback (so the /api trust fence and
+  // the settings mirror treat the embedded page as host-mode).
+  window.__DSH_TRANSPORT__ = {
+    fetch: function (input, init) {
+      var bridged = resolveFetch(input, init);
+      if (bridged === null) return realFetch(input, init);
+      return bridged;
+    },
+    openStream: openStream,
+    ownsHost: true
   };
-  window.WebSocket.prototype = RealWebSocket.prototype;
-  window.WebSocket.CONNECTING = RealWebSocket.CONNECTING;
-  window.WebSocket.OPEN = RealWebSocket.OPEN;
-  window.WebSocket.CLOSING = RealWebSocket.CLOSING;
-  window.WebSocket.CLOSED = RealWebSocket.CLOSED;
 
   // Public handle for diagnostics.
   window.desktopBridge = {
     kind: 'dsh-desktop-stdio',
-    version: '0.3.0'
+    version: '0.4.0',
+    transport: '__DSH_TRANSPORT__'
   };
 })();

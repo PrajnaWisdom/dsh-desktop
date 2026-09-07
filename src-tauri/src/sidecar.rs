@@ -4,7 +4,7 @@
 //! 通过 stdin/stdout 上的 JSON-lines 协议通信：
 //!   out（发给 sidecar）:
 //!     {"t":"fetch","id":"f1","method":"POST","url":"http://127.0.0.1/api/...","headers":{...},"body":"..."}
-//!     {"t":"cancel","id":"f1"}  {"t":"subscribe","id":"s1","stream":"mux"|"host"}
+//!     {"t":"cancel","id":"f1"}  {"t":"subscribe","id":"s1","endpoint":"$events","payload":{"args":{}}}
 //!     {"t":"unsubscribe","id":"s1"}  {"t":"ping"}  {"t":"shutdown"}
 //!   in（来自 sidecar）:
 //!     {"t":"ready",...} {"t":"pong"}
@@ -298,8 +298,11 @@ impl Sidecar {
         let _ = self.write_line(&json!({ "t": "cancel", "id": id }).to_string());
     }
 
-    pub fn subscribe(&self, stream: &str, sub_id: &str) -> Result<(), String> {
-        self.write_line(&json!({ "t": "subscribe", "id": sub_id, "stream": stream }).to_string())
+    pub fn subscribe(&self, endpoint: &str, payload: &serde_json::Value, sub_id: &str) -> Result<(), String> {
+        self.write_line(
+            &json!({ "t": "subscribe", "id": sub_id, "endpoint": endpoint, "payload": payload })
+                .to_string(),
+        )
     }
 
     pub fn unsubscribe(&self, sub_id: &str) -> Result<(), String> {

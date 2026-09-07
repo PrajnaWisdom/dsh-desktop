@@ -59,8 +59,13 @@ pub fn dsh_cancel(app: AppHandle, id: String) {
 }
 
 #[tauri::command]
-pub fn dsh_subscribe(app: AppHandle, stream: String, sub_id: String) -> Result<(), String> {
-    app.state::<Sidecar>().subscribe(&stream, &sub_id)
+pub fn dsh_subscribe(
+    app: AppHandle,
+    endpoint: String,
+    payload: serde_json::Value,
+    sub_id: String,
+) -> Result<(), String> {
+    app.state::<Sidecar>().subscribe(&endpoint, &payload, &sub_id)
 }
 
 #[tauri::command]

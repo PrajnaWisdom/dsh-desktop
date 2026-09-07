@@ -6,11 +6,12 @@
 // socket is ever opened.
 //
 // Exports the settled context, the /api shared fetch handler, the downlink
-// stream sources (apiProxy.events.mux/host) and the carrier registry so both
-// the stdio protocol loop (main.js) and the in-process self-test can use it.
+// stream sources (typertGateway.wireStream.open) and the carrier registry so
+// both the stdio protocol loop (main.js) and the in-process self-test can use
+// it.
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 export const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -32,38 +33,6 @@ process.env.DSH_HOME = DSH_HOME;
 
 export const CSP_META = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\' data:; connect-src \'self\'; worker-src \'self\' blob:; object-src \'none\'; base-uri \'self\'; form-action \'self\'">';
 
-/** server-request envelope (mirrors client-connection's internal wire shape). */
-export function serverRequest(frame) {
-  return { type: 'server-request', rpcId: frame.rpcId, method: frame.payload.type, payload: frame.payload };
-}
-
-/**
- * Ensure the home's flat `@deepseek-ai` scope is junctioned to the real DSH
- * installation BEFORE any `@deepseek-ai/*` import runs. The sidecar is copied
- * into `$DSH_HOME/profiles/node_modules/@dsh-desktop/sidecar`, so its
- * `import('@deepseek-ai/...')` resolves from the home's flat node_modules —
- * which must already point at the installation. Uses a Node junction (no
- * admin), the same mechanism as dsh-app-boot's own ensureSymlink.
- *
- * When the anchor already lives inside the home (dev junction / prior heal)
- * there is nothing to do; when it points at the bundled resource
- * (`<resource>/dsh/node_modules/@deepseek-ai/dsh/package.json`), the scope is
- * linked so the sidecar's own imports resolve, and every in-box plugin then
- * resolves its transitive imports from its real directory under the resource.
- */
-function ensureScopeJunction() {
-  const flat = join(DSH_HOME, 'profiles', 'node_modules');
-  if (INSTALL_ANCHOR.startsWith(flat)) return;
-  const scopeLink = join(flat, '@deepseek-ai');
-  const scopeTarget = dirname(dirname(INSTALL_ANCHOR));
-  try {
-    mkdirSync(dirname(scopeLink), { recursive: true });
-    symlinkSync(scopeTarget, scopeLink, 'junction');
-  } catch (error) {
-    if (error?.code !== 'EEXIST') log('scope junction warning:', error?.message ?? error);
-  }
-}
-
 /**
  * Boot the web profile and wire the /api handler, stream sources and the
  * client bridge (route + index taps) into the carrier.
@@ -72,23 +41,24 @@ function ensureScopeJunction() {
 export async function bootSidecar() {
   const started = Date.now();
 
-  // Link the installation scope into the home first: the dynamic imports below
-  // (and everything the profile loads) resolve `@deepseek-ai/*` from it.
-  ensureScopeJunction();
-
+  // The sidecar lives in the home's flat node_modules (`@dsh-desktop/sidecar`),
+  // not inside the installation, so a bare `@deepseek-ai/*` import cannot
+  // resolve until the fallback is healed. Import the boot modules directly from
+  // the installation by absolute path (their own transitive imports resolve
+  // from the installation's node_modules). `healProfilesModuleFallback` below
+  // then mirrors the full dependency closure (scoped AND unscoped deps such as
+  // `schemastery`) into `$DSH_HOME/profiles/node_modules` for the Loader and
+  // the in-box `@dsh-desktop/*` plugins.
+  const scopeDir = dirname(dirname(INSTALL_ANCHOR)); // <install>/node_modules/@deepseek-ai
   const [
     { boot, loadProfile, healProfilesModuleFallback, composeEntries, loadLayeredEnv },
     { provideCmdline },
-    { toFetchHandler },
-    { API_PATH },
     { DSH_LAUNCH_ENVIRONMENT_KEY },
     { StdioWebServer }
   ] = await Promise.all([
-    import('@deepseek-ai/dsh-app-boot'),
-    import('@deepseek-ai/dsh-cmdline'),
-    import('@deepseek-ai/dsh-host-apiproxy'),
-    import('@deepseek-ai/dsh-client-connection'),
-    import('@deepseek-ai/dsh-launch-environment'),
+    import(pathToFileURL(join(scopeDir, 'dsh-app-boot', 'lib', 'index.js')).href),
+    import(pathToFileURL(join(scopeDir, 'dsh-cmdline', 'lib', 'index.js')).href),
+    import(pathToFileURL(join(scopeDir, 'dsh-launch-environment', 'lib', 'index.js')).href),
     import('./carrier.js'),
   ]);
 
@@ -98,13 +68,12 @@ export async function bootSidecar() {
   // snapshot the launcher provides under DSH_LAUNCH_ENVIRONMENT_KEY.
   const environment = loadLayeredEnv('dsh-desktop');
 
-  try {
-    healProfilesModuleFallback(INSTALL_ANCHOR, DSH_HOME);
-  } catch (error) {
-    log('healProfilesModuleFallback warning:', error?.message ?? error);
-  }
-
   const profile = loadProfile('dsh-desktop', 'web', INSTALL_ANCHOR, DSH_HOME);
+
+  // 0.1.2-rc.1 fallback healing: mirror the install's dependency closure into
+  // the home's flat node_modules (the Loader and every plugin — including the
+  // desktop's own @dsh-desktop/* — resolve their imports from here).
+  await healProfilesModuleFallback({ installAnchor: INSTALL_ANCHOR, profile, home: DSH_HOME });
 
   // The root config file is the Loader include anchor; the CLI initializes it
   // to an empty entry list. Create it when a fresh home has none.
@@ -178,10 +147,36 @@ export async function bootSidecar() {
     });
   } catch (error) {
     log('BOOT FAILED:', error?.stack ?? error);
+    // Surface the nested cause chain (cordis wraps the real failure).
+    let cause = error?.cause;
+    let depth = 0;
+    while (cause && depth < 12) {
+      log(`  caused by [${depth}]:`, cause?.stack ?? cause?.message ?? String(cause));
+      if (Array.isArray(cause?.errors)) {
+        for (const entry of cause.errors) {
+          log('    entry error:', entry?.stack ?? entry?.message ?? String(entry));
+        }
+      }
+      cause = cause?.cause;
+      depth += 1;
+    }
     throw error;
   }
 
-  const apiProxy = ctx.get('apiProxy');
+  const typertGateway = ctx.get('typertGateway');
+
+  // The desktop is a loopback-only embedded host (Route C stdio, no TCP port):
+  // there is no external browser origin to protect against, so the
+  // 0.1.2-rc.1 client-connection browser token/cookie auth is redundant here.
+  // Bypass it — otherwise the WebView index gets 401 and every /api request is
+  // rejected before the transport bridge can answer. (The Host/Origin trust
+  // fence is likewise moot: the protocol handler already normalizes every
+  // request to 127.0.0.1 and strips origin/fetch-metadata.)
+  const connection = ctx.get('connection');
+  if (connection) {
+    connection.requestRejection = () => undefined;
+    connection.authorizeIndex = () => true;
+  }
 
   // The carrier (webServer shim) already has every route the composition
   // mounted: /api (client-connection, with the trust fence + Typert
@@ -204,38 +199,13 @@ export async function bootSidecar() {
       res.end(bridgeScript);
     }
   });
-  // Inject the bridge at the very start of <head>, BEFORE the client-modules
-  // preload scripts (which are also injected right after <head>). The client
-  // runtime captures globalThis.fetch at its own load time, so the patch must
-  // already be installed or the /api calls bypass it and hit the trust fence
-  // as real browser fetches (origin/referer mismatch -> 403).
-  carrier.tapIndex((html) => html.replace('<head>', `<head>\n    <script src="/__dsh-bridge.js"></script>`));
-
-  // Serve the client-connection bundle with a one-line patch: recognize the
-  // Tauri custom-protocol page origin `http://<scheme>.localhost` as loopback.
-  // The client computes `connection.isLoopback = isLoopbackHostname(location.hostname)`,
-  // which only accepts `localhost`/`127.*`/`[::1]`; `dsh.localhost` fails it, so
-  // the settings mirror runs in "memory" mode and the models page reports
-  // "settings are unavailable in this browser". Accepting a `.localhost` suffix
-  // restores host-mode settings over /api (the sidecar IS loopback).
-  const connectionClientPath = join(PROFILES_NODE_MODULES, '@deepseek-ai', 'dsh-client-connection', 'lib', 'client.js');
-  try {
-    const source = readFileSync(connectionClientPath, 'utf8');
-    const needle = 'hostname === "[::1]") return true;';
-    if (!source.includes(needle)) throw new Error('loopback patch needle not found');
-    const patched = source.replace(needle, 'hostname === "[::1]" || hostname.endsWith(".localhost")) return true;');
-    carrier.register({
-      kind: 'exact',
-      path: '/plugins/@deepseek-ai/dsh-client-connection/client.js',
-      handler: async (_req, res) => {
-        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' });
-        res.end(patched);
-      }
-    });
-    log('loopback patch applied to client-connection bundle (+', patched.length - source.length, 'bytes)');
-  } catch (error) {
-    log('loopback patch SKIPPED:', error?.message ?? error);
-  }
+  // Inject the CSP + bridge at the very start of <head>, BEFORE the
+  // client-modules preload scripts. The client runtime reads
+  // globalThis.__DSH_TRANSPORT__ (fetch + openStream + ownsHost) at its own
+  // load time, so the bridge must already be installed or the /api calls fall
+  // back to real browser fetch (origin/referer mismatch -> 403) and the
+  // downlink stream is unavailable.
+  carrier.tapIndex((html) => html.replace('<head>', `<head>\n    ${CSP_META}\n    <script src="/__dsh-bridge.js"></script>`));
 
   let dshVersion = 'unknown';
   try {
@@ -244,7 +214,7 @@ export async function bootSidecar() {
 
   return {
     ctx,
-    apiProxy,
+    typertGateway,
     sharedHandler,
     carrier,
     profile,

@@ -97,6 +97,8 @@ function renderRow(row) {
       return { placement: row.placement, markup: `<script>${row.text}<\/script>` };
     case 'script-src':
       return { placement: row.placement, markup: `<script src="${escapeHtmlAttribute(row.src)}"><\/script>` };
+    case 'script-preload':
+      return { placement: 'head', markup: `<link rel="preload" as="script" href="${escapeHtmlAttribute(row.src)}">` };
     case 'style':
       return { placement: 'head', markup: `<style>${row.text}</style>` };
     case 'html':
@@ -110,6 +112,9 @@ function splice(html, at, markup) {
   return `${html.slice(0, at)}${markup}${html.slice(at)}`;
 }
 
+/** Tail script settling the boot-readiness deferred (mirrors the real WebServer). */
+const READY_MARKUP = "<script>(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()<\/script>";
+
 function renderIndexInjections(html, rows) {
   let head = '';
   let body = '';
@@ -118,6 +123,7 @@ function renderIndexInjections(html, rows) {
     if (rendered.placement === 'head') head += rendered.markup;
     else body += rendered.markup;
   }
+  body += READY_MARKUP;
   let out = html;
   if (head !== '') {
     const open = /<head(?:\s[^>]*)?>/i.exec(out);
@@ -217,7 +223,8 @@ export class StdioWebServer {
     if (exact !== undefined) return exact;
     let best;
     for (const [prefix, handler] of this.prefixes) {
-      if (pathname.startsWith(prefix) && (best === undefined || prefix.length > best[0].length)) {
+      if (pathname !== prefix && !pathname.startsWith(`${prefix}/`)) continue;
+      if (best === undefined || prefix.length > best[0].length) {
         best = [prefix, handler];
       }
     }

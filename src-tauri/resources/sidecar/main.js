@@ -5,22 +5,21 @@
 //
 //   in:   {"t":"fetch","id":"f1","method":"GET","url":"http://127.0.0.1/api/...","headers":{...},"body":"..."}
 //         {"t":"cancel","id":"f1"}
-//         {"t":"subscribe","id":"s1","stream":"mux"|"host"}
+//         {"t":"subscribe","id":"s1","endpoint":"$events","payload":{"args":{}}}
 //         {"t":"unsubscribe","id":"s1"}
 //         {"t":"ping"}   {"t":"shutdown"}
 //   out:  {"t":"ready",...}
 //         {"t":"response","id":"f1","status":200,"headers":[["content-type","text/html"]]}
 //           + 分帧 body：[u32 大端长度][原始字节]... 以长度 0 结束（0xFFFFFFFF = 中止）
-//         {"t":"frame","id":"s1","frame":{type:"server-request",rpcId,method,payload}}
+//         {"t":"frame","id":"s1","frame":<raw gateway stream item>}
 //         {"t":"end","id":"s1"}
 //         {"t":"pong"}
 //
 // stdout is reserved for protocol frames; every diagnostic goes to stderr.
 
-import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 
-import { bootSidecar, log, DSH_HOME, serverRequest } from './boot.js';
+import { bootSidecar, log, DSH_HOME } from './boot.js';
 
 // stdout is the protocol channel — never write logs there.
 console.log = console.info = console.warn = console.debug = (...args) => process.stderr.write(args.map(String).join(' ') + '\n');
@@ -79,7 +78,7 @@ function serialize(fn) {
 }
 
 const started = Date.now();
-let apiProxy;
+let typertGateway;
 let sharedHandler = null;
 
 // ---- /api fetch handling ----
@@ -181,20 +180,19 @@ function handleCancel(msg) {
 // ---- downlink streams ----
 const subscriptions = new Map(); // subId -> { abort }
 
-function openStream(stream, subId) {
+function openStream(endpoint, payload, subId) {
   if (subscriptions.has(subId)) return;
   const controller = new AbortController();
-  const iterator = stream === 'host'
-    ? apiProxy.events.host({ rpcId: String(randomUUID()), payload: {} }, controller.signal)
-    : apiProxy.events.mux({ rpcId: String(randomUUID()), payload: {} }, controller.signal);
   subscriptions.set(subId, { abort: () => controller.abort() });
   (async () => {
     try {
+      // wireStream.open is async: it resolves to the stream's async iterable.
+      const iterator = await typertGateway.wireStream.open(endpoint, payload, controller.signal);
       for await (const frame of iterator) {
-        serialize(() => { send({ t: 'frame', id: subId, frame: serverRequest(frame) }); });
+        serialize(() => { send({ t: 'frame', id: subId, frame }); });
       }
     } catch (error) {
-      if (error?.name !== 'AbortError') log('stream error', stream, subId, error?.message ?? error);
+      if (error?.name !== 'AbortError') log('stream error', endpoint, subId, error?.message ?? error);
     } finally {
       if (subscriptions.delete(subId)) serialize(() => { send({ t: 'end', id: subId }); });
     }
@@ -225,7 +223,7 @@ async function handleLine(line) {
       handleCancel(msg);
       break;
     case 'subscribe':
-      openStream(msg.stream, msg.id);
+      openStream(msg.endpoint, msg.payload, msg.id);
       break;
     case 'unsubscribe':
       closeStream(msg.id);
@@ -240,7 +238,7 @@ async function handleLine(line) {
 
 // ---- boot, then serve the protocol ----
 const handle = await bootSidecar();
-apiProxy = handle.apiProxy;
+typertGateway = handle.typertGateway;
 sharedHandler = handle.sharedHandler;
 
 send({
