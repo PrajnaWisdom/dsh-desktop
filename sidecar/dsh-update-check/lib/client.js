@@ -158,6 +158,7 @@ window.__ModuleLoader__.load({
     // ---- mount ----
     var inject = ["slots", "locale"];
     function apply(ctx) {
+      var t = ctx.locale.bind(NS);
       ctx.effect(function () {
         return ctx.locale.register(NS, { zh: zh, en: en });
       }, "dsh-update-check: dictionaries");
@@ -166,8 +167,12 @@ window.__ModuleLoader__.load({
           name: "settings.section",
           id: "dsh-update-check",
           order: 21,
-          label: function () { return ctx.locale.bind(NS)("title"); },
-          locale: NS
+          label: function () { return t("title"); },
+          locale: NS,
+          // 0.1.2-rc.1: the settings shell no longer forwards `t` to section
+          // owners (SettingsSectionOwnerProps is just { close }); registrants
+          // pass their own faces through `inject`.
+          inject: function () { return { t: t }; }
         }, UpdateCheckSection);
       });
     }

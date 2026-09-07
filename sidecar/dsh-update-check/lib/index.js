@@ -6,8 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
-import z from "schemastery";
+import z from "@deepseek-ai/schemastery";
 
 //#region routes
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
@@ -149,9 +148,9 @@ function makeRoute() {
 //#region plugin
 /** Stable cordis plugin name. */
 const name = "dsh-update-check";
-const inject = ["webServer"];
+const inject = ["webServer", "settings"];
 
-const UPDATE_CHECK_NAMESPACE = settingsNamespace("dsh-update-check");
+const UPDATE_CHECK_NAMESPACE = "dsh-update-check";
 const Config = z.object({
   enabled: z.boolean().default(true)
 });
@@ -177,7 +176,7 @@ function apply(ctx, config) {
       handler
     });
   };
-  installSettingsSection(ctx, UPDATE_CHECK_NAMESPACE, Config, config ?? {}, {
+  ctx.settings.installSection(ctx, UPDATE_CHECK_NAMESPACE, Config, config ?? {}, {
     setSource: (source) => {
       current = source;
       sync();

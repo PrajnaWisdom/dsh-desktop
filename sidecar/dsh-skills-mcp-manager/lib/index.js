@@ -10,9 +10,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { cp, copyFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
 
 // ---------- API paths (shared with the browser half) ----------
 const API = {
@@ -532,9 +531,9 @@ function makeRoutes({ skills, mcp }) {
 
 // ---------- plugin ----------
 const name = 'dsh-skills-mcp-manager'
-const inject = ['webServer', 'tools', 'systemPrompt']
+const inject = ['webServer', 'tools', 'systemPrompt', 'settings']
 
-const SKILLS_MCP_NAMESPACE = settingsNamespace('dsh-skills-mcp-manager')
+const SKILLS_MCP_NAMESPACE = 'dsh-skills-mcp-manager'
 const Config = z.object({
   enabled: z.boolean().default(true),
   announceToAgent: z.boolean().default(true),
@@ -580,7 +579,7 @@ function apply(ctx, config) {
     void mcp.reload()
   }
 
-  installSettingsSection(ctx, SKILLS_MCP_NAMESPACE, Config, config ?? {}, {
+  ctx.settings.installSection(ctx, SKILLS_MCP_NAMESPACE, Config, config ?? {}, {
     setSource: (source) => { current = source; sync() },
     onChange: sync,
   })

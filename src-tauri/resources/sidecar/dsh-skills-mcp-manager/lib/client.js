@@ -414,6 +414,7 @@ window.__ModuleLoader__.load({
     // ---------- mount ----------
     var inject = ["slots", "locale", "workspaces"];
     function apply(ctx) {
+      var t = ctx.locale.bind(NS);
       ctx.effect(function () {
         return ctx.locale.register(NS, { zh: zh, en: en });
       }, "dsh-skills-mcp-manager: dictionaries");
@@ -422,9 +423,18 @@ window.__ModuleLoader__.load({
           name: "settings.section",
           id: "dsh-skills-mcp-manager",
           order: 20,
-          label: function () { return ctx.locale.bind(NS)("title"); },
+          label: function () { return t("title"); },
           locale: NS,
-          inject: function () { return { pickDirectory: function () { return ctx.workspaces.pickDirectory(); } }; }
+          // 0.1.2-rc.1: the settings shell no longer forwards `t` /
+          // `useWorkspaces` to section owners; registrants pass their own
+          // faces through `inject`.
+          inject: function () {
+            return {
+              t: t,
+              useWorkspaces: ctx.workspaces.useWorkspaces,
+              pickDirectory: function () { return ctx.workspaces.pickDirectory(); }
+            };
+          }
         }, Section);
       });
     }
