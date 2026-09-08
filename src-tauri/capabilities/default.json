@@ -1,10 +1,21 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "DSH Desktop 主窗口默认权限",
-  "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "autostart:default"
-  ]
-}
+[
+  {
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "DSH Desktop 主窗口默认权限",
+    "windows": ["main"],
+    "permissions": [
+      "core:default",
+      "autostart:default"
+    ]
+  },
+  {
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "notify-window",
+    "description": "通知弹窗窗口（右下角 notify-*）：提供关闭按钮所需的 IPC",
+    "windows": ["notify-*"],
+    "permissions": [
+      "core:default"
+    ]
+  }
+]

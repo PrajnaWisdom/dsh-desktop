@@ -352,6 +352,7 @@ pub fn run() {
             bridge::dsh_unsubscribe,
             // 桌面通知（dsh-notify 使用）
             notify::show_notification,
+            notify::close_notification,
         ]);
     bridge::register_protocol(builder)
         .on_page_load(|_window, _payload| {})

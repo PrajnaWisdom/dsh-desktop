@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tauri::{AppHandle, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 static NOTIFY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -163,4 +163,13 @@ pub async fn show_notification(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 通知弹窗内容页「关闭」按钮调用的命令：直接关闭调用它的通知窗口。
+/// 内容页（/api/dsh-notify/popup 的 http 页面）通过
+/// `window.__TAURI_INTERNALS__.invoke('close_notification')` 调用，
+/// Tauri 会把发起调用的窗口作为 `window` 参数注入，无需前端知道窗口 label。
+#[tauri::command]
+pub fn close_notification(window: WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|e| format!("关闭通知窗口失败: {e}"))
 }
