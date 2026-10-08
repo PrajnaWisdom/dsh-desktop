@@ -43,13 +43,15 @@ function writeJson(res, status, body) {
 }
 //#endregion
 
-/** Resolve the installed @deepseek-ai/dsh version (0.1.0-rc.7 etc.). */
-function installedDshVersion() {
+/** Resolve the installed @deepseek-ai/dsh version across 0.1 and 0.2 layouts. */
+function installedDshVersion(ctx) {
   const home = process.env.DSH_HOME || join(homedir(), ".dsh");
+  const profileAnchor = ctx.get("profileContext")?.installAnchor;
   const candidates = [
+    profileAnchor,
     join(home, "profiles", "node_modules", "@deepseek-ai", "dsh", "package.json"),
     join(home, "profiles", "web", "node_modules", "@deepseek-ai", "dsh", "package.json")
-  ];
+  ].filter((path) => typeof path === "string");
   for (const path of candidates) {
     try {
       const manifest = JSON.parse(readFileSync(path, "utf8"));
@@ -108,7 +110,7 @@ async function fetchLatestDshVersion() {
 }
 
 /** Build the /api/dsh-update-check/check route. */
-function makeRoute() {
+function makeRoute(ctx) {
   return {
     kind: "exact",
     path: "/api/dsh-update-check/check",
@@ -121,7 +123,7 @@ function makeRoute() {
         writeJson(res, 405, { ok: false, error: "method not allowed" });
         return;
       }
-      const current = installedDshVersion();
+      const current = installedDshVersion(ctx);
       try {
         const latest = await fetchLatestDshVersion();
         const cmp = current === null ? null : compareVersions(latest, current);
@@ -157,11 +159,13 @@ const Config = z.object({
 const DEFAULT_ENABLED = true;
 
 function apply(ctx, config) {
-  let current = () => config ?? {};
   const resolve = () => ({
-    enabled: current().enabled ?? DEFAULT_ENABLED
+    enabled: config?.enabled ?? DEFAULT_ENABLED
   });
-  const { handler } = makeRoute();
+  ctx.inject(["settings"], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber));
+  });
+  const { handler } = makeRoute(ctx);
   let disposeRoute;
   const sync = () => {
     const value = resolve();
@@ -176,13 +180,6 @@ function apply(ctx, config) {
       handler
     });
   };
-  ctx.settings.installSection(ctx, UPDATE_CHECK_NAMESPACE, Config, config ?? {}, {
-    setSource: (source) => {
-      current = source;
-      sync();
-    },
-    onChange: sync
-  });
   ctx.effect(() => () => {
     if (disposeRoute !== void 0) disposeRoute();
   }, "dsh-update-check: route");

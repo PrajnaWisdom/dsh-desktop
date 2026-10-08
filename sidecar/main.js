@@ -19,7 +19,7 @@
 
 import readline from 'node:readline';
 
-import { bootSidecar, log, DSH_HOME } from './boot.js';
+import { bootSidecar, log, DSH_HOME, openGatewayStream } from './boot.js';
 
 // stdout is the protocol channel — never write logs there.
 console.log = console.info = console.warn = console.debug = (...args) => process.stderr.write(args.map(String).join(' ') + '\n');
@@ -186,8 +186,8 @@ function openStream(endpoint, payload, subId) {
   subscriptions.set(subId, { abort: () => controller.abort() });
   (async () => {
     try {
-      // wireStream.open is async: it resolves to the stream's async iterable.
-      const iterator = await typertGateway.wireStream.open(endpoint, payload, controller.signal);
+      // The gateway open call is async and changed shape in DSH 0.2.
+      const iterator = await openGatewayStream(typertGateway, endpoint, payload, controller.signal);
       for await (const frame of iterator) {
         serialize(() => { send({ t: 'frame', id: subId, frame }); });
       }
@@ -243,7 +243,7 @@ sharedHandler = handle.sharedHandler;
 
 send({
   t: 'ready',
-  version: '0.3.0',
+  version: '0.4.0',
   dsh: handle.dshVersion,
   profile: handle.profile.name,
   home: DSH_HOME,

@@ -169,7 +169,7 @@ window.__ModuleLoader__.load({
           order: 21,
           label: function () { return t("title"); },
           locale: NS,
-          // 0.1.2-rc.1: the settings shell no longer forwards `t` to section
+          // The settings shell does not forward `t` to section
           // owners (SettingsSectionOwnerProps is just { close }); registrants
           // pass their own faces through `inject`.
           inject: function () { return { t: t }; }

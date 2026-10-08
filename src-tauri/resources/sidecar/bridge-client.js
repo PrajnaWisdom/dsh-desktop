@@ -4,7 +4,7 @@
 // makes the web transport ride Tauri IPC to the sidecar instead of HTTP /
 // WebSocket.
 //
-// DSH 0.1.2-rc.1 reads `globalThis.__DSH_TRANSPORT__` (a first-class embedding
+// DSH reads `globalThis.__DSH_TRANSPORT__` (a first-class embedding
 // hook: `fetch`, `openStream`, `ownsHost`) from the client-connection plugin.
 // We provide that hook — `fetch` carries the /api unary RPC channel, and
 // `openStream` carries the Typert live streams ($events / session/control /

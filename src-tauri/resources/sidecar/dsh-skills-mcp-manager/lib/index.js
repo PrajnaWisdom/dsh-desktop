@@ -547,10 +547,12 @@ const SKILLS_MCP_GUIDANCE =
   '本机已安装 dsh-skills-mcp-manager 插件（技能与 MCP 管理器）：设置页「技能与 MCP」。能力：浏览/启用/禁用/删除/导入技能（项目级 .dsh/skills、.agents/skills 与用户级 ~/.dsh/skills、~/.agents/skills）；管理 MCP 服务器（stdio 与 streamable-http），启用即真实连接并把工具注册为 mcp__<server>__<tool>。限制：MCP 配置存 ~/.dsh/mcp.json；技能启用/禁用通过改写 SKILL.md 前言实现；删除为物理删除不可恢复。用户提到「技能管理 / 技能导入 / MCP 服务器」时即指本插件。'
 
 function apply(ctx, config) {
-  let current = () => config ?? {}
   const resolve = () => ({
-    enabled: current().enabled ?? DEFAULT_ENABLED,
-    announceToAgent: current().announceToAgent ?? DEFAULT_ANNOUNCE,
+    enabled: config?.enabled ?? DEFAULT_ENABLED,
+    announceToAgent: config?.announceToAgent ?? DEFAULT_ANNOUNCE,
+  })
+  ctx.inject(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
 
   const skills = new SkillsManager()
@@ -578,11 +580,6 @@ function apply(ctx, config) {
     }, 'dsh-skills-mcp-manager: routes')
     void mcp.reload()
   }
-
-  ctx.settings.installSection(ctx, SKILLS_MCP_NAMESPACE, Config, config ?? {}, {
-    setSource: (source) => { current = source; sync() },
-    onChange: sync,
-  })
 
   ctx.effect(() => () => { void mcp.dispose() }, 'dsh-skills-mcp-manager: mcp')
 

@@ -3,7 +3,7 @@
 // loopback host) to exercise a full round-trip: session.create -> session.prompt
 // -> observe the mux downlink stream for the agent turn, tool calls, and the
 // assistant reply. All output to stderr.
-import { bootSidecar, log } from './boot.js';
+import { bootSidecar, log, openGatewayStream } from './boot.js';
 
 const handle = await bootSidecar();
 const { carrier, typertGateway } = handle;
@@ -27,7 +27,7 @@ log('sessionId:', sessionId);
 // Open the $events downlink BEFORE prompting so we catch the whole turn.
 const frames = [];
 const controller = new AbortController();
-const iterator = typertGateway.wireStream.open('$events', { args: {} }, controller.signal);
+const iterator = await openGatewayStream(typertGateway, '$events', { args: {} }, controller.signal);
 const pump = (async () => {
   for await (const frame of iterator) {
     const t = frame?.event ?? frame?.type;

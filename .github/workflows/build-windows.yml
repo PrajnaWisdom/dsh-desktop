@@ -8,7 +8,7 @@ on:
 
 env:
   # 捆绑的内置 DSH 版本（npm 包 @deepseek-ai/dsh）
-  DSH_VERSION: "0.1.2-rc.1"
+  DSH_VERSION: "0.2.0-rc.2"
   # 捆绑的 Node.js 运行时版本（win-x64）
   # 22.21.1（V8 12.4）在 Windows 上会在导入技能等长会话场景触发
   # V8 JIT 栈缓冲区溢出（0xC0000409），升级到 24.x（V8 13.x）规避。
@@ -69,7 +69,7 @@ jobs:
           npm install --no-audit --no-fund --save-exact "@deepseek-ai/dsh@$ver"
           # 校验：渲染链子包必须与主包同版本，不一致直接让构建失败
           $main = (Get-Content "node_modules/@deepseek-ai/dsh/package.json" -Raw | ConvertFrom-Json).version
-          foreach ($p in @("dsh-host-frontend-static", "dsh-host-webserver", "dsh-web-app")) {
+          foreach ($p in @("dsh-host-frontend-static", "dsh-host-webserver", "dsh-web-app", "dsh-web-frontend", "dsh-web")) {
             $v = (Get-Content "node_modules/@deepseek-ai/$p/package.json" -Raw | ConvertFrom-Json).version
             if ($v -ne $main) { Write-Error "@deepseek-ai/$p=$v 与 dsh=$main 版本不一致"; exit 1 }
             Write-Host "  ok @deepseek-ai/$p = $v"

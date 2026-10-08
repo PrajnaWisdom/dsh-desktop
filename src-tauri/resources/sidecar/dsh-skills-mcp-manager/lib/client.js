@@ -425,7 +425,7 @@ window.__ModuleLoader__.load({
           order: 20,
           label: function () { return t("title"); },
           locale: NS,
-          // 0.1.2-rc.1: the settings shell no longer forwards `t` /
+          // The settings shell does not forward `t` /
           // `useWorkspaces` to section owners; registrants pass their own
           // faces through `inject`.
           inject: function () {

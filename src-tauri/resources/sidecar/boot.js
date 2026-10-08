@@ -10,7 +10,7 @@
 // both the stdio protocol loop (main.js) and the in-process self-test can use
 // it.
 
-import { readFileSync, existsSync, writeFileSync, readdirSync, rmSync, rmdirSync, lstatSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, rmSync, rmdirSync, lstatSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -35,15 +35,12 @@ process.env.DSH_HOME = DSH_HOME;
 export const CSP_META = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\' \'unsafe-inline\' \'unsafe-eval\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\' data:; connect-src \'self\'; worker-src \'self\' blob:; object-src \'none\'; base-uri \'self\'; form-action \'self\'">';
 
 /**
- * Remove stale install-fallback entries under `$DSH_HOME/profiles/node_modules`
- * before `healProfilesModuleFallback` runs. A previous dsh generation (0.1.1)
- * materialized `@deepseek-ai` as ONE whole-scope junction (and some transitive
- * scoped deps as real directories), while 0.1.2-rc.1 creates ONE junction per
- * package. Those stale entries make `ensureSymlink` throw
- * "exists and is not a symlink or dsh-managed module proxy".
+ * Remove stale install-fallback entries under `$DSH_HOME/profiles/node_modules`.
+ * DSH 0.1.x projected installation dependencies into this shared directory;
+ * DSH 0.2.x resolves them in memory and must not inherit stale package copies.
  *
  * We keep `@dsh-desktop` (the desktop's own sidecar + plugins, installed by
- * install_sidecar); everything else is re-created by the heal as junctions.
+ * install_sidecar); every legacy DSH projection is safe to discard.
  * Junctions/symlinks are removed as links — never followed into their target.
  */
 function cleanStaleFallback(modulesDir) {
@@ -71,9 +68,45 @@ function cleanStaleFallback(modulesDir) {
         unlinkSync(full);
       }
     } catch {
-      // best-effort: the heal will surface any real conflict
+      // best-effort: the 0.2.x resolver will surface any real conflict
     }
   }
+}
+
+function createAppReady() {
+  let ready = false;
+  const listeners = new Set();
+  return {
+    service: {
+      onReady(listener) {
+        if (ready) {
+          listener();
+          return () => {};
+        }
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    },
+    commit() {
+      if (ready) return;
+      ready = true;
+      for (const listener of [...listeners]) listener();
+      listeners.clear();
+    },
+  };
+}
+
+const EMPTY_UPLINK = Object.freeze({
+  async *[Symbol.asyncIterator]() {},
+});
+
+export function openGatewayStream(typertGateway, endpoint, payload, signal) {
+  const open = typertGateway.wireStream.open;
+  // DSH 0.2 adds uplink and peer parameters; retain the 0.1 call shape for
+  // externally supplied installations during migration.
+  return open.length >= 5
+    ? open(endpoint, payload, EMPTY_UPLINK, undefined, signal)
+    : open(endpoint, payload, signal);
 }
 
 /**
@@ -84,14 +117,9 @@ function cleanStaleFallback(modulesDir) {
 export async function bootSidecar() {
   const started = Date.now();
 
-  // The sidecar lives in the home's flat node_modules (`@dsh-desktop/sidecar`),
-  // not inside the installation, so a bare `@deepseek-ai/*` import cannot
-  // resolve until the fallback is healed. Import the boot modules directly from
-  // the installation by absolute path (their own transitive imports resolve
-  // from the installation's node_modules). `healProfilesModuleFallback` below
-  // then mirrors the full dependency closure (scoped AND unscoped deps such as
-  // `schemastery`) into `$DSH_HOME/profiles/node_modules` for the Loader and
-  // the in-box `@dsh-desktop/*` plugins.
+  // The sidecar lives outside the DSH installation. Import boot modules through
+  // an installation-anchored resolver; PluginPackages below then supplies the
+  // complete deterministic runtime package table to the Loader.
   // Resolve the install's boot modules through Node's own resolution, anchored
   // at the dsh package, so BOTH npm's nested layout
   // (`node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/...`) and a flat
@@ -101,7 +129,7 @@ export async function bootSidecar() {
   const requireFromInstall = createRequire(INSTALL_ANCHOR);
   const resolveInstall = (spec) => requireFromInstall.resolve(spec);
   const [
-    { boot, loadProfile, healProfilesModuleFallback, composeEntries, loadLayeredEnv },
+    { boot, loadProfile, createRuntimeResolution, PluginPackages, readProfilePatches, composeEntries, loadLayeredEnv },
     { provideCmdline },
     { DSH_LAUNCH_ENVIRONMENT_KEY },
     { StdioWebServer }
@@ -120,19 +148,37 @@ export async function bootSidecar() {
 
   const profile = loadProfile('dsh-desktop', 'web', INSTALL_ANCHOR, DSH_HOME);
 
-  // 0.1.2-rc.1 fallback healing: mirror the install's dependency closure into
-  // the home's flat node_modules (the Loader and every plugin — including the
-  // desktop's own @dsh-desktop/* — resolve their imports from here).
+  // Remove the legacy 0.1.x projection tree before switching to the 0.2.x
+  // in-memory package resolver. Keep @dsh-desktop because the bundled sidecar
+  // and plugins are application-owned packages installed in that scope.
   cleanStaleFallback(join(DSH_HOME, 'profiles', 'node_modules'));
-  await healProfilesModuleFallback({ installAnchor: INSTALL_ANCHOR, profile, home: DSH_HOME });
+  const resolution = await createRuntimeResolution({
+    installAnchor: INSTALL_ANCHOR,
+    profile,
+    home: DSH_HOME,
+  });
 
-  // The root config file is the Loader include anchor; the CLI initializes it
-  // to an empty entry list. Create it when a fresh home has none.
+  // The Loader may persist its composed tree into the include root during
+  // shutdown. Rewrite the root on every launch so bundle rows never duplicate.
   const rootConfig = join(profile.dir, 'cordis.yml');
-  if (!existsSync(rootConfig)) writeFileSync(rootConfig, '[]\n', 'utf8');
+  writeFileSync(rootConfig, '[]\n', 'utf8');
+
+  const profileContext = {
+    name: profile.name,
+    dir: profile.dir,
+    patchPath: profile.patchPath,
+    installAnchor: INSTALL_ANCHOR,
+    startedBundles: profile.layers.map((layer) => layer.packageName),
+    cwd: process.cwd(),
+    home: DSH_HOME,
+    overlays: [],
+    telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
+  };
+  const profilePatches = readProfilePatches('dsh-desktop', profileContext, profile);
 
   // stdio overlay: replace the transport rows, keep everything else intact.
   const overlay = [
+    { id: 'hmr', disabled: true }, // packaged resources are immutable; reloads can tear down the stdio carrier
     { id: 'webserver', disabled: true }, // the real WebServer createServer+listen — replaced by the shim
     {
       id: 'web-runtime',
@@ -151,7 +197,7 @@ export async function bootSidecar() {
   // agent-presets service finds the standard/code/minimal/cordis roster.
   const shippedPresetRoot = join(dirname(INSTALL_ANCHOR), 'config', 'agent-presets');
   const composedRows = new Map();
-  for (const row of composeEntries([...profile.layers.flatMap((layer) => layer.patches), ...profile.patches])) {
+  for (const row of composeEntries(profilePatches)) {
     if (typeof row.id === 'string') composedRows.set(row.id, row);
   }
   const agentPresetsRow = composedRows.get('agent-presets');
@@ -166,8 +212,7 @@ export async function bootSidecar() {
   }
 
   const patches = [
-    ...profile.layers.flatMap((layer) => layer.patches),
-    ...profile.patches,
+    ...profilePatches,
     // 内置插件层：随桌面客户端打包的一线插件（由 install_sidecar 复制到
     // `@dsh-desktop/<plugin>`），这里直接插入其 cordis 行，无需用户改
     // profile 的 bundles 列表。
@@ -183,12 +228,20 @@ export async function bootSidecar() {
   const carrier = new StdioWebServer();
   const bridgeScript = readFileSync(join(SIDECAR_DIR, 'bridge-client.js'), 'utf8');
 
+  const appReady = createAppReady();
   let ctx;
   try {
-    ctx = await boot('dsh-desktop', rootConfig, patches, (hostCtx) => {
-      // The launcher facts the web composition reads (mirrors runProfile).
+    ctx = await boot('dsh-desktop', rootConfig, patches, async (hostCtx) => {
+      // Mirror the 0.2.x profile launcher: publish profile facts and install
+      // deterministic package routing before any configured entry mounts.
+      hostCtx.provide('profileContext', profileContext);
       hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment);
-      provideCmdline(hostCtx, { args: [], exit: () => process.exit(0) });
+      await hostCtx.plugin(PluginPackages, { resolution });
+      provideCmdline(hostCtx, {
+        args: [],
+        exit: () => process.exit(0),
+        ready: appReady.service,
+      });
       // Give the shim the root context so renderIndex can emit the
       // `webserver/index-inject` event (client-modules / client-ui-theme
       // contribute their rows there).
@@ -214,11 +267,12 @@ export async function bootSidecar() {
     throw error;
   }
 
+  appReady.commit();
   const typertGateway = ctx.get('typertGateway');
 
   // The desktop is a loopback-only embedded host (Route C stdio, no TCP port):
   // there is no external browser origin to protect against, so the
-  // 0.1.2-rc.1 client-connection browser token/cookie auth is redundant here.
+  // client-connection browser token/cookie auth is redundant here.
   // Bypass it — otherwise the WebView index gets 401 and every /api request is
   // rejected before the transport bridge can answer. (The Host/Origin trust
   // fence is likewise moot: the protocol handler already normalizes every
@@ -260,7 +314,7 @@ export async function bootSidecar() {
 
   let dshVersion = 'unknown';
   try {
-    dshVersion = JSON.parse(readFileSync(join(PROFILES_NODE_MODULES, '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version;
+    dshVersion = JSON.parse(readFileSync(INSTALL_ANCHOR, 'utf8')).version;
   } catch { /* informational */ }
 
   return {

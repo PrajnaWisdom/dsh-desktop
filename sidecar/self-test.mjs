@@ -6,7 +6,7 @@
 //
 //   node self-test.mjs [--home <dsh-home>]
 
-import { bootSidecar } from './boot.js';
+import { bootSidecar, openGatewayStream } from './boot.js';
 
 const out = (name, value) => process.stderr.write(`[selftest] ${name}: ${JSON.stringify(value, null, 1)}\n`);
 
@@ -29,7 +29,7 @@ check('typertGateway', !!typertGateway && typeof typertGateway.wireStream?.open 
 // ---- 2. $events downlink stream yields its ready frame deterministically ----
 try {
   const controller = new AbortController();
-  const iterator = await typertGateway.wireStream.open('$events', { args: {} }, controller.signal);
+  const iterator = await openGatewayStream(typertGateway, '$events', { args: {} }, controller.signal);
   const first = await iterator.next();
   controller.abort();
   check('events.$events.ready', first?.value?.type === 'ready' && !!first.value.clientId, first?.value);
