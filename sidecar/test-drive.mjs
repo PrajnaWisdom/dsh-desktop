@@ -5,14 +5,13 @@
 //   node test-drive.mjs --home <dsh-home> --anchor <dsh package.json>
 
 import { spawn } from 'node:child_process';
-import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 const NODE = process.env.TEST_NODE || process.execPath;
 const args = process.argv.slice(2);
-const entry = new URL('./main.js', import.meta.url).pathname;
+const entry = fileURLToPath(new URL('./main.js', import.meta.url));
 
 const child = spawn(NODE, [entry, ...args], { stdio: ['pipe', 'pipe', 'inherit'] });
-const rl = readline.createInterface({ input: child.stdout });
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -22,27 +21,71 @@ const check = (name, ok, detail) => {
 
 let readyResolve;
 const readyPromise = new Promise((resolve) => { readyResolve = resolve; });
-let nextFetch = new Map(); // id -> {resolve}
-let frames = []; // subId -> frames
+const nextFetch = new Map(); // id -> { resolve }
+const frames = []; // { subId, list, ended }
+let input = Buffer.alloc(0);
+let responseState;
 
-rl.on('line', (line) => {
-  let msg;
-  try { msg = JSON.parse(line); } catch { return; }
+function handleMessage(msg) {
   if (msg.t === 'ready') { readyResolve(msg); return; }
   if (msg.t === 'pong') return;
-  if (msg.t === 'response' && nextFetch.has(msg.id)) {
-    const entry2 = nextFetch.get(msg.id);
-    nextFetch.delete(msg.id);
-    entry2.resolve(msg);
-  }
-  if (msg.t === 'frame' && frames.some((f) => f.subId === msg.id)) {
-    const f = frames.find((x) => x.subId === msg.id);
-    f.list.push(msg.frame);
+  if (msg.t === 'frame') {
+    const frame = frames.find((candidate) => candidate.subId === msg.id);
+    if (frame) frame.list.push(msg.frame);
+    return;
   }
   if (msg.t === 'end') {
-    const f = frames.find((x) => x.subId === msg.id);
-    if (f) f.ended = true;
+    const frame = frames.find((candidate) => candidate.subId === msg.id);
+    if (frame) frame.ended = true;
   }
+}
+
+function finishResponse(aborted) {
+  const { header, chunks } = responseState;
+  responseState = undefined;
+  const pending = nextFetch.get(header.id);
+  if (!pending) return;
+  nextFetch.delete(header.id);
+  pending.resolve({ ...header, body: Buffer.concat(chunks), aborted });
+}
+
+function drainOutput() {
+  for (;;) {
+    if (responseState) {
+      if (responseState.chunkLength === undefined) {
+        if (input.length < 4) return;
+        const chunkLength = input.readUInt32BE(0);
+        input = input.subarray(4);
+        if (chunkLength === 0 || chunkLength === 0xffffffff) {
+          finishResponse(chunkLength === 0xffffffff);
+          continue;
+        }
+        responseState.chunkLength = chunkLength;
+      }
+      if (input.length < responseState.chunkLength) return;
+      responseState.chunks.push(input.subarray(0, responseState.chunkLength));
+      input = input.subarray(responseState.chunkLength);
+      responseState.chunkLength = undefined;
+      continue;
+    }
+
+    const newline = input.indexOf(0x0a);
+    if (newline < 0) return;
+    const line = input.subarray(0, newline).toString('utf8').replace(/\r$/, '');
+    input = input.subarray(newline + 1);
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.t === 'response') {
+      responseState = { header: msg, chunks: [], chunkLength: undefined };
+      continue;
+    }
+    handleMessage(msg);
+  }
+}
+
+child.stdout.on('data', (chunk) => {
+  input = input.length === 0 ? chunk : Buffer.concat([input, chunk]);
+  drainOutput();
 });
 
 const send = (msg) => child.stdin.write(`${JSON.stringify(msg)}\n`);
@@ -70,23 +113,26 @@ try {
 
   // unary fetch over the protocol
   const resp = await Promise.race([
-    fetch('f1', 'POST', 'http://127.0.0.1/api/host.describe', JSON.stringify({ type: 'client-request', rpcId: 'drive-1', method: 'host.describe', payload: {} })),
+    fetch('f1', 'POST', 'http://127.0.0.1/api/settings/describe', JSON.stringify({ type: 'client-request', rpcId: 'drive-1', method: 'settings/describe', payload: { args: {} } })),
     sleep(30000).then(() => null)
   ]);
-  check('fetch host.describe', !!resp && resp.status === 200 && JSON.parse(Buffer.from(resp.bodyB64, 'base64').toString()).result?.ok === true, resp && { status: resp.status });
+  const described = resp && !resp.aborted ? JSON.parse(resp.body.toString('utf8')) : undefined;
+  check('fetch settings/describe', !!resp && resp.status === 200 && described?.result?.ok === true, resp && { status: resp.status, aborted: resp.aborted, result: described?.result });
 
-  // stream: subscribe mux, create a session, expect frames, then end
+  // The first page navigation must survive frontend-static readiness/reloads.
+  const index = await Promise.race([
+    fetch('f2', 'GET', 'http://127.0.0.1/', undefined),
+    sleep(30000).then(() => null)
+  ]);
+  const html = index && !index.aborted ? index.body.toString('utf8') : '';
+  check('fetch index', !!index && index.status === 200 && html.includes('/__dsh-bridge.js'), index && { status: index.status, aborted: index.aborted });
+
+  // Subscribe to host events and verify the downlink before ending it.
   const sub = { subId: 's1', list: [], ended: false };
   frames.push(sub);
-  send({ t: 'subscribe', id: 's1', stream: 'mux' });
-  await sleep(400);
-  const created = await Promise.race([
-    fetch('f2', 'POST', 'http://127.0.0.1/api/session.create', JSON.stringify({ type: 'client-request', rpcId: 'drive-2', method: 'session.create', payload: {} })),
-    sleep(30000).then(() => null)
-  ]);
-  check('fetch session.create', !!created && created.status === 200, created && { status: created.status });
-  const gotFrames = await waitFor(() => sub.list.length >= 1, 15000, 'mux frames');
-  check('mux frames', gotFrames, sub.list.slice(0, 3));
+  send({ t: 'subscribe', id: 's1', endpoint: '$events', payload: { args: {} } });
+  const gotFrames = await waitFor(() => sub.list.length >= 1, 15000, 'event frames');
+  check('event frames', gotFrames, sub.list.slice(0, 3));
   send({ t: 'unsubscribe', id: 's1' });
   const gotEnd = await waitFor(() => sub.ended, 5000, 'stream end');
   check('stream end', gotEnd, { ended: sub.ended });

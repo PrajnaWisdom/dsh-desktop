@@ -232,7 +232,7 @@ impl Sidecar {
         }
         // 内置插件：复制到 `@dsh-desktop/<plugin>`（与 sidecar 同级，Node 从
         // profile 目录向上遍历可解析，boot.js 据此注入插件行）。
-        const BUNDLED_PLUGINS: [&str; 2] = ["dsh-update-check", "dsh-skills-mcp-manager"];
+        const BUNDLED_PLUGINS: [&str; 3] = ["dsh-update-check", "dsh-skills-mcp-manager", "dsh-qoder-agent"];
         for plugin in BUNDLED_PLUGINS {
             let plugin_src = source.join(plugin);
             if plugin_src.join("package.json").is_file() {

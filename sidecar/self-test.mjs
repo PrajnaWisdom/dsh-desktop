@@ -7,6 +7,7 @@
 //   node self-test.mjs [--home <dsh-home>]
 
 import { bootSidecar, openGatewayStream } from './boot.js';
+import { StdioWebServer } from './carrier.js';
 
 const out = (name, value) => process.stderr.write(`[selftest] ${name}: ${JSON.stringify(value, null, 1)}\n`);
 
@@ -17,7 +18,7 @@ const check = (name, ok, detail) => {
 };
 
 const handle = await bootSidecar();
-const { typertGateway, carrier, profile, dshVersion, bootMs } = handle;
+const { ctx, typertGateway, sharedHandler, carrier, profile, dshVersion, bootMs } = handle;
 out('boot', { ok: true, dsh: dshVersion, profile: profile.name, bootMs });
 
 // ---- 1. Typert gateway service mounted (replaces the removed apiProxy) ----
@@ -67,5 +68,41 @@ try {
   check('dispatch /__dsh-bridge.js', false, String(error?.message ?? error));
 }
 
-out('summary', { failures, total: 4 });
+// ---- 5. every desktop fetch restores the embedded Connection trust policy ----
+try {
+  const connection = ctx.get('connection');
+  if (!connection) throw new Error('connection service is unavailable');
+  connection.requestRejection = () => 401;
+  connection.authorizeIndex = () => false;
+  const response = await sharedHandler.fetch(new Request('http://127.0.0.1/'));
+  const requestAllowed = connection.requestRejection({}) === undefined;
+  const indexAllowed = connection.authorizeIndex() === true;
+  check('connection bypass survives reload', response.status === 200 && requestAllowed && indexAllowed, {
+    status: response.status,
+    requestAllowed,
+    indexAllowed
+  });
+} catch (error) {
+  check('connection bypass survives reload', false, String(error?.message ?? error));
+}
+
+// ---- 6. dispatch holds a navigation across a transient fallback reload gap ----
+try {
+  const reloadingCarrier = new StdioWebServer();
+  const pending = reloadingCarrier.dispatch(new Request('http://127.0.0.1/'));
+  setTimeout(() => {
+    reloadingCarrier.registerFallback(async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('fallback restored');
+    });
+  }, 10);
+  const response = await pending;
+  check('dispatch waits for fallback', response.status === 200 && await response.text() === 'fallback restored', {
+    status: response.status
+  });
+} catch (error) {
+  check('dispatch waits for fallback', false, String(error?.message ?? error));
+}
+
+out('summary', { failures, total: 6 });
 process.exit(failures === 0 ? 0 : 1);

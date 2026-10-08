@@ -149,6 +149,8 @@ export class StdioWebServer {
     this.indexTaps = [];
     /** single fallback seat (frontend-static) */
     this.fallback = undefined;
+    /** waiters blocked while frontend-static is mounting or reloading */
+    this.fallbackWaiters = new Set();
     /** Informational bind literal; the shell opens no socket. */
     this._host = '127.0.0.1';
     this._port = 3080;
@@ -181,7 +183,33 @@ export class StdioWebServer {
     if (typeof handler !== 'function') throw new TypeError('StdioWebServer: fallback must be a function');
     if (this.fallback !== undefined) throw new Error('StdioWebServer: duplicate fallback');
     this.fallback = handler;
+    const waiters = [...this.fallbackWaiters];
+    this.fallbackWaiters.clear();
+    for (const resolve of waiters) resolve(handler);
     return () => { if (this.fallback === handler) this.fallback = undefined; };
+  }
+
+  /** Wait for frontend-static to claim the fallback seat. */
+  async waitForFallback(timeoutMs = 5000) {
+    if (this.fallback !== undefined) return this.fallback;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new TypeError('StdioWebServer: fallback wait timeout must be a positive finite number');
+    }
+    return new Promise((resolve, reject) => {
+      const onFallback = (handler) => {
+        clearTimeout(timer);
+        resolve(handler);
+      };
+      const timer = setTimeout(() => {
+        this.fallbackWaiters.delete(onFallback);
+        reject(new Error(`StdioWebServer: fallback was not registered within ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.fallbackWaiters.add(onFallback);
+      // Close the registration race between the initial check and waiter insert.
+      if (this.fallback !== undefined && this.fallbackWaiters.delete(onFallback)) {
+        onFallback(this.fallback);
+      }
+    });
   }
 
   tapIndex(transform) {
@@ -237,8 +265,19 @@ export class StdioWebServer {
    */
   async dispatch(request) {
     const url = new URL(request.url);
-    const handler = this.match(url.pathname) ?? this.fallback;
-    if (handler === undefined) return new Response('not found', { status: 404 });
+    let handler = this.match(url.pathname) ?? this.fallback;
+    if (handler === undefined) {
+      // Loader reloads release effects before mounting their replacements. Hold
+      // an in-flight navigation briefly instead of exposing that internal gap
+      // as a user-visible 404 page.
+      try {
+        await this.waitForFallback(2000);
+      } catch {
+        return new Response('not found', { status: 404 });
+      }
+      handler = this.match(url.pathname) ?? this.fallback;
+      if (handler === undefined) return new Response('not found', { status: 404 });
+    }
     const req = shimRequest(request);
     const res = new ShimResponse();
     await handler(req, res);

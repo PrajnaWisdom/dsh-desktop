@@ -96,6 +96,25 @@ function createAppReady() {
   };
 }
 
+const allowEmbeddedRequest = () => undefined;
+const allowEmbeddedIndex = () => true;
+
+/** Apply the Route C trust policy to one live client-connection service. */
+export function applyEmbeddedConnectionBypass(connection) {
+  if (connection === undefined) return;
+  connection.requestRejection = allowEmbeddedRequest;
+  connection.authorizeIndex = allowEmbeddedIndex;
+}
+
+/** Keep the trust policy attached when a settings reload replaces Connection. */
+function installEmbeddedConnectionBypass(ctx) {
+  const fiber = ctx.inject(['connection'], (child) => {
+    applyEmbeddedConnectionBypass(child.connection);
+  });
+  applyEmbeddedConnectionBypass(ctx.get('connection'));
+  return fiber;
+}
+
 const EMPTY_UPLINK = Object.freeze({
   async *[Symbol.asyncIterator]() {},
 });
@@ -220,6 +239,7 @@ export async function bootSidecar() {
       insert: [
         { id: 'ui-dsh-update-check', name: '@dsh-desktop/dsh-update-check' },
         { id: 'ui-dsh-skills-mcp-manager', name: '@dsh-desktop/dsh-skills-mcp-manager' },
+        { id: 'ui-dsh-qoder-agent', name: '@dsh-desktop/dsh-qoder-agent' },
       ],
     },
     ...overlay
@@ -267,21 +287,15 @@ export async function bootSidecar() {
     throw error;
   }
 
-  appReady.commit();
   const typertGateway = ctx.get('typertGateway');
 
   // The desktop is a loopback-only embedded host (Route C stdio, no TCP port):
   // there is no external browser origin to protect against, so the
-  // client-connection browser token/cookie auth is redundant here.
-  // Bypass it — otherwise the WebView index gets 401 and every /api request is
-  // rejected before the transport bridge can answer. (The Host/Origin trust
-  // fence is likewise moot: the protocol handler already normalizes every
-  // request to 127.0.0.1 and strips origin/fetch-metadata.)
-  const connection = ctx.get('connection');
-  if (connection) {
-    connection.requestRejection = () => undefined;
-    connection.authorizeIndex = () => true;
-  }
+  // client-connection browser token/cookie auth is redundant here. Register a
+  // real injected fiber instead of patching the current instance only once:
+  // settings mutations can rebuild Connection, and the replacement must receive
+  // the same embedded-host policy before the next browser request.
+  await installEmbeddedConnectionBypass(ctx);
 
   // The carrier (webServer shim) already has every route the composition
   // mounted: /api (client-connection, with the trust fence + Typert
@@ -291,6 +305,10 @@ export async function bootSidecar() {
   const sharedHandler = {
     fetch: (input, init) => {
       const request = input instanceof Request ? input : new Request(input, init);
+      // Service notification and an incoming WebView request can share the same
+      // turn. Reapply synchronously as a final guard before dispatching through
+      // routes that close over the current Connection instance.
+      applyEmbeddedConnectionBypass(ctx.get('connection'));
       return carrier.dispatch(request);
     }
   };
@@ -311,6 +329,13 @@ export async function bootSidecar() {
   // back to real browser fetch (origin/referer mismatch -> 403) and the
   // downlink stream is unavailable.
   carrier.tapIndex((html) => html.replace('<head>', `<head>\n    ${CSP_META}\n    <script src="/__dsh-bridge.js"></script>`));
+
+  // Readiness listeners may enqueue Loader work. Do not expose the protocol as
+  // ready until that work has settled and frontend-static owns the fallback
+  // seat; otherwise the WebView's first navigation can observe a transient 404.
+  appReady.commit();
+  await ctx.get('loader')?.await();
+  await carrier.waitForFallback();
 
   let dshVersion = 'unknown';
   try {
