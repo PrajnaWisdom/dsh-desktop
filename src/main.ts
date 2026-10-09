@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 interface StatusPayload {
@@ -49,6 +50,7 @@ const btnLog = $<HTMLButtonElement>("btn-log");
 const bundleHome = $<HTMLElement>("bundle-home");
 const banner = $<HTMLDivElement>("banner");
 const toast = $<HTMLDivElement>("toast");
+const versionEl = $<HTMLElement>("version");
 
 // ---- 状态 ----
 let settings: Settings = {
@@ -237,6 +239,14 @@ autostartInput.addEventListener("change", async () => {
 // ---- 初始化 ----
 async function init(): Promise<void> {
   autoOpenInput.checked = autoOpen;
+
+  // 版本徽标以运行时的应用版本为准；HTML 里写死的值只作兜底，
+  // 免得发版时忘了同步徽标（历史上就对不上过）。
+  getVersion()
+    .then((v) => {
+      versionEl.textContent = `v${v}`;
+    })
+    .catch(() => {});
 
   if (!inTauri) {
     banner.textContent =

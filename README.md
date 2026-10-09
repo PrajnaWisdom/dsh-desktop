@@ -134,7 +134,7 @@ npm run tauri build
 产物位置（版本号跟随 `tauri.conf.json`）：
 
 ```
-src-tauri\target\release\bundle\nsis\DSH Desktop_0.4.29_x64-setup.exe   # NSIS 安装包（简体中文 / English）
+src-tauri\target\release\bundle\nsis\DSH Desktop_0.4.30_x64-setup.exe   # NSIS 安装包（简体中文 / English）
 ```
 
 方式三：GitHub Actions（推荐，完整内置版）。
