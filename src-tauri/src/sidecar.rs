@@ -149,6 +149,17 @@ impl Sidecar {
         Ok(Self::data_dir(app)?.join("sidecar.log"))
     }
 
+    /// 把一行桌面侧诊断写入运行日志文件（与 sidecar 的 stderr 同一文件），
+    /// 保证托盘「查看日志」能看到完整信息；同时输出到 stderr 便于开发调试。
+    pub(crate) fn append_log(app: &AppHandle, line: &str) {
+        eprintln!("[dsh-desktop] {line}");
+        if let Ok(path) = Self::log_path(app) {
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "[desktop] {line}");
+            }
+        }
+    }
+
     /// sidecar 源码目录：优先安装包资源（`<resource>/sidecar`），
     /// 开发模式回退到 exe 邻近的仓库 `sidecar/` 目录（或 `DSH_DESKTOP_SIDECAR_SRC`）。
     fn sidecar_source(app: &AppHandle) -> Option<PathBuf> {
@@ -232,7 +243,10 @@ impl Sidecar {
         }
         // 内置插件：复制到 `@dsh-desktop/<plugin>`（与 sidecar 同级，Node 从
         // profile 目录向上遍历可解析，boot.js 据此注入插件行）。
-        const BUNDLED_PLUGINS: [&str; 3] = ["dsh-update-check", "dsh-skills-mcp-manager", "dsh-qoder-agent"];
+        // 注意：dsh-qoder-agent 不做内置分发，改由用户安装为 profile bundle
+        // （profiles/web/package.json 的 dsh.profile.bundles），其自带 cordis.patch.yml
+        // 声明 host 行与 Qoder 会话类型 preset。
+        const BUNDLED_PLUGINS: [&str; 2] = ["dsh-update-check", "dsh-skills-mcp-manager"];
         for plugin in BUNDLED_PLUGINS {
             let plugin_src = source.join(plugin);
             if plugin_src.join("package.json").is_file() {
@@ -534,7 +548,7 @@ impl Sidecar {
                 Some("boot-failed") => {
                     let message = msg.get("message").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
                     let _ = app.emit("dsh-status", Self::status_of(&inner));
-                    eprintln!("[dsh-desktop] sidecar boot failed: {message}");
+                    Self::append_log(&app, &format!("sidecar boot failed: {message}"));
                 }
                 _ => {}
             }
@@ -594,7 +608,10 @@ fn read_chunked_body(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Opt
             if let Some(prev) = *last {
                 if now.duration_since(prev) < Duration::from_secs(5) {
                     inner.restarting.store(false, Ordering::SeqCst);
-                    eprintln!("[dsh-desktop] sidecar 连续快速崩溃，已停止自动重启，请检查日志或手动重启");
+                    Self::append_log(
+                        &app,
+                        "sidecar 连续快速崩溃，已停止自动重启，请检查日志或手动重启",
+                    );
                     return;
                 }
             }
@@ -606,7 +623,7 @@ fn read_chunked_body(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Opt
             let result = sidecar.spawn(&app);
             inner.restarting.store(false, Ordering::SeqCst);
             if let Err(e) = result {
-                eprintln!("[dsh-desktop] sidecar 自动重启失败: {e}");
+                Self::append_log(&app, &format!("sidecar 自动重启失败: {e}"));
             }
         });
     }

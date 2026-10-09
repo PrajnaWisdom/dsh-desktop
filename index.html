@@ -10,25 +10,15 @@
     <div id="app">
       <header class="app-header">
         <div class="brand">
-          <div class="brand-logo" aria-hidden="true">
-            <svg viewBox="0 0 48 48" width="34" height="34">
-              <path
-                d="M14 12 L26 24 L14 36"
-                fill="none"
-                stroke="#22d3ee"
-                stroke-width="5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-              <rect x="30" y="19" width="9" height="10" rx="2.5" fill="#22d3ee" />
-            </svg>
+          <div class="brand-logo">
+            <img src="/app-mark.png" alt="OwnerHarness" width="46" height="46" />
           </div>
           <div>
             <h1>DSH Desktop</h1>
             <p class="subtitle">DeepSeek Harness 桌面客户端</p>
           </div>
         </div>
-        <span id="version" class="version-badge">v0.3.0</span>
+        <span id="version" class="version-badge">v0.4.29</span>
       </header>
 
       <main>
@@ -47,7 +37,7 @@
           </div>
           <label class="check-row">
             <input id="auto-open" type="checkbox" checked />
-            <span>就绪后自动嵌入 DSH Web GUI</span>
+            <span>就绪后自动进入 DSH（启动时不再显示本页）</span>
           </label>
         </section>
 
@@ -75,9 +65,9 @@
         <section class="card about-card">
           <h2>使用提示</h2>
           <ul>
-            <li>关闭窗口会最小化到<strong>系统托盘</strong>，右键托盘图标可打开 / 返回控制台 / 退出。</li>
+            <li>关闭窗口会最小化到<strong>系统托盘</strong>，右键托盘图标可打开 DSH / 返回控制台 / 查看日志 / 退出。</li>
             <li>点击托盘图标可显示或隐藏主窗口。</li>
-            <li>「返回控制台」可随时从嵌入的 DSH 页面回到本设置页。</li>
+            <li>勾选「就绪后自动进入 DSH」后，启动不再显示本页，直接进入 DSH；随时可用托盘「返回控制台」回到这里。</li>
           </ul>
         </section>
       </main>

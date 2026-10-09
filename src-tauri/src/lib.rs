@@ -44,6 +44,10 @@ struct Settings {
     /// 应用启动时自动启动内置 DSH sidecar
     #[serde(default = "default_true")]
     auto_start_server: bool,
+    /// 就绪后自动嵌入 DSH Web GUI：开启时启动不显示本地控制台页，
+    /// 等服务就绪后直接进入 DSH（隐藏「启动页」）。
+    #[serde(default = "default_true")]
+    auto_open: bool,
 }
 
 impl Default for Settings {
@@ -52,6 +56,7 @@ impl Default for Settings {
             host: "127.0.0.1".into(),
             port: 3080,
             auto_start_server: true,
+            auto_open: true,
         }
     }
 }
@@ -189,12 +194,17 @@ fn get_sidecar_info(app: AppHandle) -> sidecar::SidecarInfo {
     app.state::<Sidecar>().info(&app)
 }
 
-#[tauri::command]
-fn open_sidecar_log(app: AppHandle) -> Result<(), String> {
-    let path = sidecar::Sidecar::log_path(&app)?;
+/// 用系统默认程序打开运行日志文件（sidecar 的 stderr + 桌面侧诊断都在这个文件里）。
+fn open_log(app: &AppHandle) -> Result<(), String> {
+    let path = sidecar::Sidecar::log_path(app)?;
     app.opener()
         .open_path(path.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_sidecar_log(app: AppHandle) -> Result<(), String> {
+    open_log(&app)
 }
 
 // ---------- 托盘 ----------
@@ -203,6 +213,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let status_item = MenuItem::with_id(app, "status", "状态：检测中", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open", "打开 DSH", true, None::<&str>)?;
     let home_item = MenuItem::with_id(app, "home", "返回控制台", true, None::<&str>)?;
+    let logs_item = MenuItem::with_id(app, "logs", "查看日志", true, None::<&str>)?;
     let autostart_item =
         CheckMenuItem::with_id(app, "autostart", "开机自启动", true, false, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -214,6 +225,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &open_item,
             &home_item,
+            &logs_item,
             &PredefinedMenuItem::separator(app)?,
             &autostart_item,
             &PredefinedMenuItem::separator(app)?,
@@ -240,6 +252,9 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "home" => {
                 let _ = open_home(app.clone());
+            }
+            "logs" => {
+                let _ = open_log(app);
             }
             "autostart" => {
                 let app = app.clone();
@@ -360,19 +375,27 @@ pub fn run() {
             app.manage(HomeUrl(Mutex::new(None)));
             app.manage(Sidecar::new());
 
-            // 开机自启动（--hidden）时不显示主窗口；否则强制显示，
-            // 覆盖 window-state 记住的「上次退出时隐藏到托盘」状态。
-            if std::env::args().any(|a| a == "--hidden") {
-                if let Some(window) = app.get_webview_window("main") {
+            let settings = load_settings(app.handle());
+            let hidden = std::env::args().any(|a| a == "--hidden");
+            // 自动嵌入 = 自动启动内置服务 且 就绪后自动进入 DSH。
+            // 此时启动阶段保持窗口隐藏，等 DSH 就绪后直接呈现 Web GUI，
+            // 用户看不到本地控制台页（即「启动页」）。
+            let auto_embed = settings.auto_start_server && settings.auto_open;
+            let main_window = app.get_webview_window("main");
+
+            // 主窗口在 tauri.conf.json 中配置为 visible=false。
+            // 这里显式决定何时显示，覆盖 window-state 记住的「上次退出时隐藏到托盘」状态。
+            if let Some(window) = main_window.as_ref() {
+                if hidden || auto_embed {
                     let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
-            } else if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
             }
 
             // 点击关闭 → 隐藏到托盘，而不是退出
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = main_window.as_ref() {
                 let win = window.clone();
                 window.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
@@ -385,11 +408,30 @@ pub fn run() {
             setup_tray(app.handle())?;
 
             // 自动启动内置 DSH sidecar（默认开启）
-            let settings = load_settings(app.handle());
             if settings.auto_start_server {
-                let app = app.handle().clone();
+                let handle = app.handle().clone();
+                let window = main_window.clone();
                 thread::spawn(move || {
-                    let _ = app.state::<Sidecar>().ensure_started(&app);
+                    let ok = handle.state::<Sidecar>().ensure_started(&handle).is_ok();
+                    // 自动嵌入：就绪后导航到 DSH，再显示窗口（跳过启动页）。
+                    // 启动失败时同样显示窗口，落到控制台页便于查看日志排查。
+                    if auto_embed && !hidden {
+                        if ok {
+                            // 前端收到 ready 事件后可能已经自行跳转，避免重复导航。
+                            let already_embedded = window
+                                .as_ref()
+                                .and_then(|w| w.url().ok())
+                                .map(|u| u.as_str().starts_with(EMBED_URL))
+                                .unwrap_or(false);
+                            if !already_embedded {
+                                let _ = navigate_main(&handle, EMBED_URL);
+                            }
+                        }
+                        if let Some(win) = window {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
                 });
             }
 

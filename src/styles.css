@@ -57,13 +57,16 @@ body {
 .brand-logo {
   width: 46px;
   height: 46px;
-  border-radius: 12px;
-  background: linear-gradient(145deg, #182742, #0e1524);
-  border: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  filter: drop-shadow(0 6px 14px rgba(2, 8, 23, 0.55));
+}
+
+.brand-logo img {
+  width: 46px;
+  height: 46px;
+  display: block;
 }
 
 .brand h1 {

@@ -11,6 +11,7 @@ interface Settings {
   host: string;
   port: number;
   auto_start_server: boolean;
+  auto_open: boolean;
 }
 
 interface SidecarInfo {
@@ -50,7 +51,12 @@ const banner = $<HTMLDivElement>("banner");
 const toast = $<HTMLDivElement>("toast");
 
 // ---- 状态 ----
-let settings: Settings = { host: "127.0.0.1", port: 3080, auto_start_server: true };
+let settings: Settings = {
+  host: "127.0.0.1",
+  port: 3080,
+  auto_start_server: true,
+  auto_open: true,
+};
 let autoOpen = localStorage.getItem(AUTO_OPEN_KEY) !== "0";
 let navigated = sessionStorage.getItem(NAVIGATED_KEY) === "1";
 let ready: boolean | null = null;
@@ -108,11 +114,16 @@ async function loadSettings(): Promise<void> {
       host: s.host?.trim() || "127.0.0.1",
       port: typeof s.port === "number" && s.port > 0 ? s.port : 3080,
       auto_start_server: s.auto_start_server !== false,
+      auto_open: s.auto_open !== false,
     };
   } catch {
     // 使用默认值
   }
   autoStartServerInput.checked = settings.auto_start_server;
+  // 后端是 auto_open 的唯一权威来源：启动时据此决定是否隐藏「启动页」。
+  autoOpen = settings.auto_open;
+  autoOpenInput.checked = autoOpen;
+  localStorage.setItem(AUTO_OPEN_KEY, autoOpen ? "1" : "0");
 }
 
 async function loadAutostart(): Promise<void> {
@@ -202,6 +213,10 @@ autoStartServerInput.addEventListener("change", () => {
 autoOpenInput.addEventListener("change", () => {
   autoOpen = autoOpenInput.checked;
   localStorage.setItem(AUTO_OPEN_KEY, autoOpen ? "1" : "0");
+  // 同步到后端：下次启动时后端据此决定是否跳过控制台页直接进 DSH。
+  settings.auto_open = autoOpen;
+  if (!inTauri) return;
+  invoke("save_settings", { settings }).catch((err) => showToast(String(err), "err"));
 });
 
 autostartInput.addEventListener("change", async () => {
