@@ -18,7 +18,7 @@
 
 use std::{
     collections::HashMap,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -76,6 +76,95 @@ pub struct SidecarStatus {
     pub dsh_version: Option<String>,
 }
 
+// ---------- 带轮转的运行日志 ----------
+
+/// 单个日志文件的上限，超过就轮转。
+const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// 保留的历史文件个数（`sidecar.log.1` ~ `sidecar.log.N`）。
+const LOG_KEEP_FILES: usize = 3;
+
+/// 历史文件名：`sidecar.log` + `.1` / `.2` / …
+fn rotated_path(path: &std::path::Path, index: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{index}"));
+    PathBuf::from(name)
+}
+
+/// 带轮转的日志写入器：sidecar 的 stderr 与桌面侧诊断共用，超出上限时
+/// `sidecar.log` → `.1`（`.1` → `.2`，依此类推，最多留 LOG_KEEP_FILES 份）。
+///
+/// sidecar 的 stderr 改为经管道读回 Rust 再落盘（原先直接重定向到文件）：
+/// 只有句柄握在我们手里，才能在不重启进程的前提下轮转。顺带给每行加上
+/// 「相对本次启动的耗时」前缀——排查启动慢这类问题时，「ready in Xms」只给出
+/// 总时长，得有时间轴才知道时间花在哪一段。
+struct LogWriter {
+    path: Option<PathBuf>,
+    file: Option<File>,
+    size: u64,
+    started: std::time::Instant,
+}
+
+impl LogWriter {
+    fn new() -> Self {
+        Self {
+            path: None,
+            file: None,
+            size: 0,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// 每次拉起 sidecar 时调用：设定目标路径、必要时先轮转、重置计时基准。
+    fn begin(&mut self, path: PathBuf) {
+        self.file = None;
+        self.size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        self.path = Some(path);
+        self.started = std::time::Instant::now();
+        if self.size >= LOG_MAX_BYTES {
+            self.rotate();
+        }
+    }
+
+    fn write_line(&mut self, line: &str) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        if self.size >= LOG_MAX_BYTES {
+            self.rotate();
+        }
+        if self.file.is_none() {
+            match OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(file) => {
+                    self.size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    self.file = Some(file);
+                }
+                Err(_) => return,
+            }
+        }
+        let stamp = self.started.elapsed().as_millis();
+        let text = format!("[+{stamp}ms] {line}\n");
+        if let Some(file) = self.file.as_mut() {
+            if file.write_all(text.as_bytes()).is_ok() {
+                self.size += text.len() as u64;
+            }
+        }
+    }
+
+    /// 先放掉句柄再改名，避免 Windows 上因文件被占用而轮转失败。
+    fn rotate(&mut self) {
+        self.file = None;
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let _ = std::fs::remove_file(rotated_path(&path, LOG_KEEP_FILES));
+        for index in (1..LOG_KEEP_FILES).rev() {
+            let _ = std::fs::rename(rotated_path(&path, index), rotated_path(&path, index + 1));
+        }
+        let _ = std::fs::rename(&path, rotated_path(&path, 1));
+        self.size = 0;
+    }
+}
+
 /// sidecar 进程 + 协议状态。
 pub struct SidecarInner {
     child: Mutex<Option<Child>>,
@@ -92,6 +181,8 @@ pub struct SidecarInner {
     last_restart_at: Mutex<Option<std::time::Instant>>,
     /// 进程代际：每次 spawn 递增，reader_loop 据此判断自己是否已被新进程取代。
     generation: AtomicU64,
+    /// 运行日志（带轮转）；sidecar 的 stderr 与桌面侧诊断都写这里。
+    log: Mutex<LogWriter>,
 }
 
 /// 由 `tauri::State` 持有（Send + Sync）。
@@ -110,6 +201,7 @@ impl Sidecar {
             restarting: AtomicBool::new(false),
             last_restart_at: Mutex::new(None),
             generation: AtomicU64::new(0),
+            log: Mutex::new(LogWriter::new()),
         }))
     }
 
@@ -149,14 +241,17 @@ impl Sidecar {
         Ok(Self::data_dir(app)?.join("sidecar.log"))
     }
 
-    /// 把一行桌面侧诊断写入运行日志文件（与 sidecar 的 stderr 同一文件），
-    /// 保证托盘「查看日志」能看到完整信息；同时输出到 stderr 便于开发调试。
+    /// 把一行桌面侧诊断写入运行日志（与 sidecar 的 stderr 同一文件、同一轮转
+    /// 策略），保证托盘「查看日志」能看到完整信息；同时输出到 stderr 便于开发调试。
     pub(crate) fn append_log(app: &AppHandle, line: &str) {
         eprintln!("[dsh-desktop] {line}");
-        if let Ok(path) = Self::log_path(app) {
-            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
-                let _ = writeln!(f, "[desktop] {line}");
-            }
+        if let Some(state) = app.try_state::<Sidecar>() {
+            state
+                .0
+                .log
+                .lock()
+                .unwrap()
+                .write_line(&format!("[desktop] {line}"));
         }
     }
 
@@ -356,31 +451,26 @@ impl Sidecar {
             return Ok(());
         }
         let log_path = Self::log_path(app)?;
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| format!("无法打开日志文件: {e}"))?;
-        let fail = |err: &str| {
-            use std::io::Write;
-            let mut f = OpenOptions::new().create(true).append(true).open(&log_path).ok();
-            if let Some(f) = f.as_mut() {
-                let _ = writeln!(f, "[spawn] {err}");
-            }
-            Err(err.to_string())
-        };
+        // 设定日志目标（必要时先轮转），并重置耗时前缀的计时基准。
+        self.0.log.lock().unwrap().begin(log_path.clone());
+
         let Some(node) = Self::bundled_node(app) else {
-            return fail("未找到内置 Node（resource node/node.exe 或 exe 同级 node/node.exe 缺失）");
+            return Self::spawn_fail(
+                app,
+                "未找到内置 Node（resource node/node.exe 或 exe 同级 node/node.exe 缺失）",
+            );
         };
         let Ok(sidecar_dir) = Self::install_sidecar(app) else {
-            return fail("sidecar 资源缺失（resources/sidecar 或仓库 sidecar/ 未找到）");
+            return Self::spawn_fail(app, "sidecar 资源缺失（resources/sidecar 或仓库 sidecar/ 未找到）");
         };
         let main = sidecar_dir.join("main.js");
         let home = Self::dsh_home(app)?;
         let Some(anchor) = Self::dsh_anchor(app) else {
-            return fail("未找到内置 DSH（resources/dsh 或 home 内的 @deepseek-ai/dsh 缺失）");
+            return Self::spawn_fail(
+                app,
+                "未找到内置 DSH（resources/dsh 或 home 内的 @deepseek-ai/dsh 缺失）",
+            );
         };
-        let err_log = log.try_clone().map_err(|e| e.to_string())?;
 
         let mut cmd = Command::new(&node);
         cmd.arg(&main)
@@ -391,7 +481,7 @@ impl Sidecar {
             .env("DSH_HOME", &home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::from(err_log));
+            .stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -401,6 +491,7 @@ impl Sidecar {
         let mut child = cmd.spawn().map_err(|e| format!("启动内置 DSH 失败: {e}"))?;
         let stdin = child.stdin.take().ok_or("无法获取 sidecar stdin")?;
         let stdout = child.stdout.take().ok_or("无法获取 sidecar stdout")?;
+        let stderr = child.stderr.take().ok_or("无法获取 sidecar stderr")?;
 
         *self.0.child.lock().unwrap() = Some(child);
         *self.0.writer.lock().unwrap() = Some(stdin);
@@ -412,7 +503,31 @@ impl Sidecar {
         let inner = self.0.clone();
         let app = app.clone();
         std::thread::spawn(move || Self::reader_loop(app, stdout, inner, log_path, gen));
+
+        // stderr 单独抽一个线程：逐行读回来，加上耗时前缀写进（可轮转的）日志。
+        let log_inner = self.0.clone();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // 子进程退出，管道关闭
+                    Ok(_) => {
+                        let text = line.trim_end_matches(|c| c == '\n' || c == '\r');
+                        log_inner.log.lock().unwrap().write_line(text);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
         Ok(())
+    }
+
+    /// spawn 阶段失败的统一出口：写日志 + 返回错误。
+    fn spawn_fail(app: &AppHandle, err: &str) -> Result<(), String> {
+        Self::append_log(app, &format!("[spawn] {err}"));
+        Err(err.to_string())
     }
 
     /// 内置 Node：安装包资源 `<resource>/node/node.exe`；

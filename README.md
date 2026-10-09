@@ -69,7 +69,7 @@ dsh-desktop/
    ```
 
    使用独立 `DSH_HOME`（`%APPDATA%\com.dsh.desktop\dsh-home`），
-   stderr 重定向到 `%APPDATA%\com.dsh.desktop\sidecar.log`。
+   stderr 经管道读回 Rust，与桌面侧诊断一起写入 `%APPDATA%\com.dsh.desktop\sidecar.log`（按大小轮转）。
 3. sidecar 在**进程内**启动 dsh 的 `web` profile——真正的 WebServer（`createServer` + `listen`）
    被一个不监听端口的 shim 替换，其余组合层不变。启动完成后在 stdout 发一行 `{"t":"ready",...}`，
    Rust 侧最长等待 90 秒。
@@ -159,7 +159,7 @@ src-tauri\target\release\bundle\nsis\DSH Desktop_0.4.30_x64-setup.exe   # NSIS �
 | --- | --- |
 | 连接 / 启动设置 | `%APPDATA%\com.dsh.desktop\settings.json`（`host`/`port` 为历史字段；实际生效的是 `auto_start_server`、`auto_open`） |
 | 内置 DSH 数据（DSH_HOME） | `%APPDATA%\com.dsh.desktop\dsh-home`（独立于系统 `~/.dsh`） |
-| 运行日志（sidecar + 桌面诊断） | `%APPDATA%\com.dsh.desktop\sidecar.log` |
+| 运行日志（sidecar + 桌面诊断） | `%APPDATA%\com.dsh.desktop\sidecar.log`（超过 4MB 自动轮转，保留 `sidecar.log.1` ~ `.3`） |
 | 窗口状态 | `%APPDATA%\com.dsh.desktop\.window-state.json`（由插件管理） |
 | 开机自启动 | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（由插件管理） |
 
@@ -170,7 +170,12 @@ A：说明内置 DSH 没有起来。先点托盘「查看日志」（或控制�
 常见原因是安装包缺少内置资源（例如用了本地构建的包）或安全软件拦截。可再点「启动内置 DSH」重试。
 
 **Q：内置 DSH 首次启动要多久？**
-A：首次启动约 5–15 秒（需要初始化 `DSH_HOME` 的 profile 并建立插件链接，使用 NTFS junction，无需管理员权限）；之后约 1–3 秒。
+A：首次启动约 5–15 秒（需要初始化 `DSH_HOME` 的 profile 并建立插件链接，使用 NTFS junction，无需管理员权限）；之后通常在数秒内。
+
+> 如果每次启动都明显偏慢，多半是**插件或 MCP server 拖的**：例如在 profile 里用
+> `command: npx, args: ["-y", "..."]` 拉起 MCP server，`npx` 每次都要做 npm 解析，
+> 在 Windows 上实测可达 **8 秒**，而改成 `command: node` 直指包内入口只要 **不到 1 秒**。
+> 日志每行都带 `[+Nms]` 前缀，可以直接看出时间花在哪一段。
 
 **Q：内置服务的数据和系统里已有 dsh 的数据冲突吗？**
 A：不冲突。内置版使用独立的 `DSH_HOME`（`%APPDATA%\com.dsh.desktop\dsh-home`）。首次使用时需在 Web 界面里重新配置模型凭据。
@@ -193,7 +198,8 @@ A：NSIS 安装包更符合 Windows 分发习惯（含桌面 / 开始菜单快�
 - [Vite 6](https://vite.dev) + TypeScript — 前端（本地控制台页）
 - Node.js — Route C sidecar 运行时（随包内置）
 - Tauri 插件：`single-instance`、`autostart`、`window-state`、`opener`
-- Rust 侧不引入日志框架：sidecar 的 stderr 直接重定向到 `sidecar.log`，桌面侧诊断由 `Sidecar::append_log()` 追加写入同一文件
+- Rust 侧不引入日志框架：sidecar 的 stderr 经管道读回 Rust，与桌面侧诊断（`Sidecar::append_log()`）
+  一起写入 `sidecar.log`；写入器自带按大小轮转，并给每行加上相对本次启动的 `[+Nms]` 耗时前缀
 
 ## License
 
