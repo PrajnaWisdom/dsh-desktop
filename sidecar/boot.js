@@ -234,9 +234,6 @@ export async function bootSidecar() {
     // 内置插件层：随桌面客户端打包的一线插件（由 install_sidecar 复制到
     // `@dsh-desktop/<plugin>`），这里直接插入其 cordis 行，无需用户改
     // profile 的 bundles 列表。
-    // 注意：dsh-qoder-agent 不在此列——它作为用户安装的 profile bundle
-    // （见 profiles/web/package.json 的 dsh.profile.bundles）由自身
-    // cordis.patch.yml 声明 host 行与 Qoder 会话类型 preset，不做内置硬编码。
     {
       insert: [
         { id: 'ui-dsh-update-check', name: '@dsh-desktop/dsh-update-check' },

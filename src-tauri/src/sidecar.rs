@@ -243,9 +243,6 @@ impl Sidecar {
         }
         // 内置插件：复制到 `@dsh-desktop/<plugin>`（与 sidecar 同级，Node 从
         // profile 目录向上遍历可解析，boot.js 据此注入插件行）。
-        // 注意：dsh-qoder-agent 不做内置分发，改由用户安装为 profile bundle
-        // （profiles/web/package.json 的 dsh.profile.bundles），其自带 cordis.patch.yml
-        // 声明 host 行与 Qoder 会话类型 preset。
         const BUNDLED_PLUGINS: [&str; 2] = ["dsh-update-check", "dsh-skills-mcp-manager"];
         for plugin in BUNDLED_PLUGINS {
             let plugin_src = source.join(plugin);
