@@ -27,7 +27,6 @@ interface SidecarInfo {
  *  用根路径（SPA 入口），不要带 /index.html——dsh-web-app 的 fallback 只对
  *  无扩展名的 SPA 路由返回 index。 */
 const EMBED_URL = "http://dsh.localhost/";
-const NAVIGATED_KEY = "dsh-desktop.navigated";
 const AUTO_OPEN_KEY = "dsh-desktop.auto-open";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
@@ -60,7 +59,6 @@ let settings: Settings = {
   auto_open: true,
 };
 let autoOpen = localStorage.getItem(AUTO_OPEN_KEY) !== "0";
-let navigated = sessionStorage.getItem(NAVIGATED_KEY) === "1";
 let ready: boolean | null = null;
 let sidecarInfo: SidecarInfo | null = null;
 
@@ -87,8 +85,6 @@ function setStatus(readyState: boolean | null, meta?: string): void {
 
 // ---- 业务逻辑 ----
 function embed(): void {
-  navigated = true;
-  sessionStorage.setItem(NAVIGATED_KEY, "1");
   window.location.href = EMBED_URL;
 }
 
@@ -157,9 +153,9 @@ async function onStatus(payload: StatusPayload): Promise<void> {
       ? "启动中…"
       : undefined;
   setStatus(payload.ready, meta);
-  if (payload.ready && autoOpen && !navigated) {
-    embed();
-  }
+  // 这里刻意不再自动跳转：启动编排统一由 Rust 负责
+  // （启动动画 → 服务就绪 → 导航 → DSH 页面加载完成 → 露出主窗口）。
+  // 前端再跳一次会让 DSH 页面重复加载，也会和主窗口的显示时机抢跑。
 }
 
 // ---- 事件绑定 ----

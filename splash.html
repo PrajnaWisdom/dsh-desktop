@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DSH Desktop</title>
+    <link rel="stylesheet" href="/src/splash.css" />
+  </head>
+  <body data-tauri-drag-region>
+    <main class="splash">
+      <div class="mark" data-tauri-drag-region>
+        <span class="halo" aria-hidden="true"></span>
+        <img class="mark-img" src="/app-mark.png" alt="" width="72" height="72" />
+      </div>
+
+      <h1 class="name">DSH Desktop</h1>
+      <p class="phase" id="phase">正在启动内置 DSH…</p>
+
+      <div class="track" id="track" aria-hidden="true"><span></span></div>
+
+      <p class="note" id="note"></p>
+
+      <div class="actions" id="actions">
+        <button type="button" class="btn primary" id="btn-retry">重试</button>
+        <button type="button" class="btn" id="btn-log">查看日志</button>
+        <button type="button" class="btn quiet" id="btn-quit">退出</button>
+      </div>
+    </main>
+
+    <script type="module" src="/src/splash.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,225 @@
+/* 启动动画窗口（splash 窗口专用，与 index.html 的控制台页样式相互独立）。
+   无边框 + 置顶 + 跳过任务栏，尺寸由 tauri.conf.json 决定（420 × 330）。 */
+
+:root {
+  --bg: #0b1020;
+  --line: #22304e;
+  --text: #e6ecf7;
+  --dim: #93a1bd;
+  --faint: #7c8aa6;
+  --accent: #22d3ee;
+  --red: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  /* 与主界面同色系：顶部一小片偏亮，往下压深 */
+  background: radial-gradient(460px 320px at 50% -18%, #1d2c50 0%, var(--bg) 72%);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.splash {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 22px 30px 20px;
+  text-align: center;
+}
+
+/* ---------- 标识 ---------- */
+
+.mark {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 16px;
+  animation: float 3.4s ease-in-out infinite;
+}
+
+.mark-img {
+  position: relative;
+  display: block;
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+
+/* 标识背后的呼吸光晕：暗示「正在工作」而不是卡住了 */
+.halo {
+  position: absolute;
+  inset: -16px;
+  border-radius: 34px;
+  background: radial-gradient(closest-side, rgba(34, 211, 238, 0.34), transparent 72%);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+
+/* ---------- 文案 ---------- */
+
+.name {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.phase {
+  margin-top: 5px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--dim);
+  min-height: 19px;
+}
+
+.note {
+  margin-top: 12px;
+  max-width: 336px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--faint);
+  word-break: break-word;
+}
+
+/* ---------- 不定量进度条 ---------- */
+
+.track {
+  position: relative;
+  width: 168px;
+  height: 3px;
+  margin-top: 20px;
+  border-radius: 2px;
+  background: #1b2743;
+  overflow: hidden;
+}
+
+.track > span {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 42%;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: sweep 1.25s ease-in-out infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(310%);
+  }
+}
+
+/* ---------- 失败状态 ---------- */
+
+body.failed .track {
+  display: none;
+}
+
+body.failed .phase {
+  color: var(--red);
+  font-weight: 600;
+}
+
+body.failed .mark,
+body.failed .halo {
+  animation: none;
+}
+
+body.failed .halo {
+  opacity: 0.18;
+}
+
+/* ---------- 操作按钮 ---------- */
+
+.actions {
+  display: none;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.actions.show {
+  display: flex;
+}
+
+.btn {
+  padding: 6px 14px;
+  border: 1px solid #2b3a5c;
+  border-radius: 8px;
+  background: #16203a;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+
+.btn:hover:not(:disabled) {
+  background: #1d2a49;
+  border-color: #3a4d78;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn.primary {
+  background: #0e7490;
+  border-color: #0e7490;
+  color: #e8feff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #0891b2;
+  border-color: #0891b2;
+}
+
+.btn.quiet {
+  background: transparent;
+  border-color: #26334f;
+  color: var(--dim);
+}

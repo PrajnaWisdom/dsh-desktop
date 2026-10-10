@@ -1,7 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 // Tauri 开发时注入 TAURI_ENV_* / TAURI_DEV_HOST 环境变量
 const host = process.env.TAURI_DEV_HOST;
+
+/** 把相对于本配置文件的路径转成绝对路径（多页面入口用）。 */
+const entry = (path: string): string => fileURLToPath(new URL(path, import.meta.url));
 
 export default defineConfig({
   // 防止 Vite 清空 Tauri 输出
@@ -28,5 +32,13 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    rollupOptions: {
+      input: {
+        // 主窗口：本地控制台页（启动时作为占位页加载，就绪后导航到 DSH）
+        main: entry("./index.html"),
+        // 启动动画：由独立的 splash 窗口加载
+        splash: entry("./splash.html"),
+      },
+    },
   },
 });

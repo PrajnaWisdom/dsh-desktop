@@ -11,6 +11,15 @@
   },
   {
     "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "splash",
+    "description": "启动动画窗口：监听 splash-status 事件 + 调用 splash_retry/open_sidecar_log/quit_app",
+    "windows": ["splash"],
+    "permissions": [
+      "core:default"
+    ]
+  },
+  {
+    "$schema": "../gen/schemas/desktop-schema.json",
     "identifier": "notify-window",
     "description": "通知弹窗窗口（右下角 notify-*）：提供关闭按钮所需的 IPC",
     "windows": ["notify-*"],
