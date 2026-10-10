@@ -102,16 +102,45 @@ struct SplashStatus {
     message: String,
 }
 
-/// 更新启动动画上的文案（失败时前端据此切到错误态并给出重试入口）。
+/// 启动动画窗口的门闸。
+///
+/// - `enabled`：本次启动是否需要呈现启动动画（由 setup 依设置决定）。
+/// - `last`：最近一次状态。**必须缓存**——窗口的显示时机被推迟到页面加载完成
+///   之后，而「启动失败」往往发生在页面注册好事件监听之前，事件会丢；
+///   页面加载完后调 `splash_ready` 补拉即可拿到当时的真实状态。
+#[derive(Default)]
+struct SplashGate {
+    enabled: AtomicBool,
+    last: Mutex<Option<SplashStatus>>,
+}
+
+/// 更新启动动画上的文案（先缓存再广播，失败时前端据此切到错误态）。
 fn notify_splash(app: &AppHandle, phase: &'static str, message: impl Into<String>) {
-    let _ = app.emit_to(
-        "splash",
-        "splash-status",
-        SplashStatus {
-            phase,
-            message: message.into(),
-        },
-    );
+    let payload = SplashStatus {
+        phase,
+        message: message.into(),
+    };
+    if let Some(gate) = app.try_state::<SplashGate>() {
+        if let Ok(mut last) = gate.last.lock() {
+            *last = Some(payload.clone());
+        }
+    }
+    let _ = app.emit_to("splash", "splash-status", payload);
+}
+
+/// 启动动画页的脚本就绪后调用：此刻 DOM 已可渲染，才把窗口显示出来
+/// （在页面加载完成前 `show()` 只会得到一个空白窗口）。
+/// 返回当前状态，供页面补上可能已经错过的 `splash-status` 事件。
+#[tauri::command]
+fn splash_ready(app: AppHandle) -> Option<SplashStatus> {
+    let gate = app.try_state::<SplashGate>()?;
+    if gate.enabled.load(Ordering::SeqCst) {
+        if let Some(splash) = app.get_webview_window("splash") {
+            let _ = splash.show();
+            let _ = splash.set_focus();
+        }
+    }
+    gate.last.lock().ok().and_then(|last| last.clone())
 }
 
 /// 收起启动动画并按需显示主窗口。幂等：只有第一次调用生效。
@@ -456,7 +485,20 @@ fn poll_loop(app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let hidden = std::env::args().any(|a| a == "--hidden");
+
+    // 所有共享状态都在 Builder 阶段注册。
+    // 窗口页面的脚本可能在 setup() 跑完之前就发起 IPC（控制台页一启动就会调
+    // sidecar_status / get_sidecar_info），若那时 state 尚未注册，
+    // AppHandle::state() 会直接 panic（"state() called before manage()"）。
     let builder = tauri::Builder::default()
+        .manage(HomeUrl(Mutex::new(None)))
+        .manage(Sidecar::new())
+        .manage(SplashGate::default())
+        .manage(Presentation {
+            done: AtomicBool::new(false),
+            allow_show: !hidden,
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 启动动画期间不打断呈现流程（否则会把还停在占位页的主窗口拽出来），
             // 只把动画窗口拉到前台。
@@ -496,6 +538,7 @@ pub fn run() {
             get_sidecar_info,
             open_sidecar_log,
             // 启动动画窗口
+            splash_ready,
             splash_retry,
             quit_app,
             // 桥接命令（bridge-client.js 使用）
@@ -509,9 +552,23 @@ pub fn run() {
         ]);
     bridge::register_protocol(builder)
         .on_page_load(|window, payload| {
+            if payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            // 启动动画窗口：等页面加载完成才显示，否则露出来的是一块空白
+            // （setup 里立刻 show() 就会这样）。
+            if window.label() == "splash" {
+                if let Some(gate) = window.app_handle().try_state::<SplashGate>() {
+                    if gate.enabled.load(Ordering::SeqCst) {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                return;
+            }
             // DSH 页面文档加载完成 → 收起启动动画、露出主窗口。
             // 这是「不闪现控制台页」的关键：在此之前主窗口一直保持隐藏。
-            if window.label() != "main" || payload.event() != PageLoadEvent::Finished {
+            if window.label() != "main" {
                 return;
             }
             if !payload.url().as_str().starts_with(EMBED_URL) {
@@ -524,21 +581,15 @@ pub fn run() {
                 present_main(&app);
             });
         })
-        .setup(|app| {
-            app.manage(HomeUrl(Mutex::new(None)));
-            app.manage(Sidecar::new());
-
+        .setup(move |app| {
             let settings = load_settings(app.handle());
-            let hidden = std::env::args().any(|a| a == "--hidden");
             // 自动嵌入 = 自动启动内置服务 且 就绪后自动进入 DSH。
             let auto_embed = settings.auto_start_server && settings.auto_open;
             // 只有这条路径需要启动动画；其余情况直接销毁它，不留可见的中间态。
             let use_splash = !hidden && auto_embed;
-
-            app.manage(Presentation {
-                done: AtomicBool::new(false),
-                allow_show: !hidden,
-            });
+            if let Some(gate) = app.try_state::<SplashGate>() {
+                gate.enabled.store(use_splash, Ordering::SeqCst);
+            }
 
             let main_window = app.get_webview_window("main");
             let splash_window = app.get_webview_window("splash");
@@ -564,11 +615,10 @@ pub fn run() {
                 }
             }
 
+            // 需要启动动画时**不在这里显示它**：此刻页面还没加载完，show() 出来
+            // 只会是一块空白。真正的显示交给 on_page_load / splash_ready。
             if let Some(splash) = splash_window.as_ref() {
-                if use_splash {
-                    let _ = splash.show();
-                    let _ = splash.set_focus();
-                } else {
+                if !use_splash {
                     let _ = splash.close();
                 }
             }

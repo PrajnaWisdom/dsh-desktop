@@ -70,16 +70,30 @@ btnQuit.addEventListener("click", () => {
   void run("quit_app", "退出");
 });
 
+/** 把一条状态应用到界面（事件与补拉共用）。 */
+function apply(payload: SplashStatus): void {
+  const { phase, message } = payload;
+  if (phase === "failed") {
+    fail(message || "内置 DSH 未能启动。");
+    return;
+  }
+  if (settled) return;
+  setPhase(message || (phase === "navigating" ? "正在打开 DSH 界面…" : "正在启动内置 DSH…"));
+}
+
 if (inTauri) {
   listen<SplashStatus>("splash-status", (event) => {
-    const { phase, message } = event.payload;
-    if (phase === "failed") {
-      fail(message || "内置 DSH 未能启动。");
-      return;
-    }
-    if (settled) return;
-    setPhase(message || (phase === "navigating" ? "正在打开 DSH 界面…" : "正在启动内置 DSH…"));
+    apply(event.payload);
   }).catch(() => {});
+
+  // 脚本跑到这里说明 DOM 已经可以渲染了，这才让 Rust 把窗口显示出来
+  // （在页面加载完成前 show() 只会是一块空白）。
+  // 启动失败往往发生在监听注册之前，所以顺手补拉一次当前状态。
+  invoke<SplashStatus | null>("splash_ready")
+    .then((snapshot) => {
+      if (snapshot) apply(snapshot);
+    })
+    .catch(() => {});
 
   window.setTimeout(() => {
     if (!settled) {
