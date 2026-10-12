@@ -39,6 +39,9 @@ pub async fn dsh_rpc(
     headers: HashMap<String, String>,
     body: Option<String>,
 ) -> Result<RpcResult, String> {
+    // 前端已经开始向后端取数 → DSH 前端确实活过来了。
+    // 启动编排据此决定何时收起启动动画（见 lib.rs 的 present_main）。
+    crate::mark_frontend_alive(&app);
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let sidecar = app.state::<Sidecar>();

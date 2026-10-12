@@ -44,12 +44,14 @@ use crate::sidecar::Sidecar;
 
 /// 启动动画的最短展示时长：sidecar 秒起时也不至于一闪而过。
 const SPLASH_MIN_SHOW: Duration = Duration::from_millis(900);
-/// 「显示主窗口」与「收起启动动画」之间的间隔。
+/// 等「主窗口里的 DSH 前端发出第一个 API 请求」的上限。
 ///
-/// 顺序上必须**先显示主窗口、再收起动画**：主窗口此时还在动画（alwaysOnTop）
-/// 后面，可以安静地把首屏渲染完，动画一收就是成品画面。
-/// 反过来（先关动画再显示窗口）中间会露出尚未渲染完的主窗口——「闪一下」就是这么来的。
-const SPLASH_HANDOFF_DELAY: Duration = Duration::from_millis(300);
+/// 主窗口一显示就会盖住启动动画，所以必须等前端真的活过来（JS 跑起来、
+/// 开始向后端取数）才收动画；否则用户先看到一个尚未接上的空界面，
+/// 左下角的连接状态要过一会儿才冒出来。
+const SPLASH_HANDOFF_MAX: Duration = Duration::from_millis(1200);
+/// 检测到前端已就绪后，再留一点时间让首屏渲染完成。
+const SPLASH_HANDOFF_SETTLE: Duration = Duration::from_millis(220);
 
 fn default_true() -> bool {
     true
@@ -118,6 +120,28 @@ struct SplashGate {
     last: Mutex<Option<SplashStatus>>,
 }
 
+/// DSH 前端是否已经「活过来」（发出过至少一个 /api 请求）。
+///
+/// 用来判断主窗口可以安全露出的时机——比固定 sleep 精准，也不会无谓地多等。
+#[derive(Default)]
+struct FrontendAlive(AtomicBool);
+
+impl FrontendAlive {
+    fn mark(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn get(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// 标记 DSH 前端已经活过来（由 `bridge::dsh_rpc` 在收到 API 请求时调用）。
+pub(crate) fn mark_frontend_alive(app: &AppHandle) {
+    if let Some(state) = app.try_state::<FrontendAlive>() {
+        state.mark();
+    }
+}
+
 /// 更新启动动画上的文案（先缓存再广播，失败时前端据此切到错误态）。
 fn notify_splash(app: &AppHandle, phase: &'static str, message: impl Into<String>) {
     let payload = SplashStatus {
@@ -170,12 +194,25 @@ fn present_main(app: &AppHandle) {
         }
     }
 
-    // 2) 再收起启动动画。有动画时才延后——没有动画的路径没必要多等。
+    // 2) 等主窗口里的 DSH 前端真的活过来，再收起启动动画。
+    //    没有动画的路径直接返回，不做无谓等待。
     let app = app.clone();
     thread::spawn(move || {
-        if app.get_webview_window("splash").is_some() {
-            thread::sleep(SPLASH_HANDOFF_DELAY);
+        if app.get_webview_window("splash").is_none() {
+            return;
         }
+        let deadline = Instant::now() + SPLASH_HANDOFF_MAX;
+        while Instant::now() < deadline {
+            let alive = app
+                .try_state::<FrontendAlive>()
+                .map(|state| state.get())
+                .unwrap_or(true);
+            if alive {
+                break;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        thread::sleep(SPLASH_HANDOFF_SETTLE);
         if let Some(splash) = app.get_webview_window("splash") {
             let _ = splash.close();
         }
@@ -509,6 +546,7 @@ pub fn run() {
         .manage(HomeUrl(Mutex::new(None)))
         .manage(Sidecar::new())
         .manage(SplashGate::default())
+        .manage(FrontendAlive::default())
         .manage(Presentation {
             done: AtomicBool::new(false),
             allow_show: !hidden,

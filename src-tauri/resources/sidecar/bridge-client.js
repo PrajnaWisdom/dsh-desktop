@@ -221,11 +221,15 @@
     }
 
     try {
-      await invoke('dsh_subscribe', { endpoint: endpoint, payload: payload, subId: subId });
+      // 先挂监听、再发起订阅。反过来（先 subscribe 再 listen）会丢消息：
+      // sidecar 在 dsh_subscribe 返回之前就可能推送首批 frame（例如 $events 的
+      // {type:'ready'}），那会儿还没有监听者，这条消息就永远消失了——前端只能
+      // 干等握手超时再重连，「连接中」被拖十几秒就是这么来的。
       unlisteners = await Promise.all([
         listen('dsh-frame', frameListener),
         listen('dsh-stream-end', endListener)
       ]);
+      await invoke('dsh_subscribe', { endpoint: endpoint, payload: payload, subId: subId });
       while (true) {
         while (queue.length > 0) yield queue.shift();
         if (ended) {
