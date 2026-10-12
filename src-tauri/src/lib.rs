@@ -143,6 +143,7 @@ fn splash_ready(app: AppHandle) -> Option<SplashStatus> {
             let _ = splash.show();
             let _ = splash.set_focus();
         }
+        Sidecar::append_log(&app, "启动动画页已就绪（splash_ready）");
     }
     gate.last.lock().ok().and_then(|last| last.clone())
 }
@@ -635,13 +636,30 @@ pub fn run() {
                 }
             }
 
-            // 需要启动动画时**不在这里显示它**：此刻页面还没加载完，show() 出来
-            // 只会是一块空白。真正的显示交给 on_page_load / splash_ready。
+            // 立即显示启动动画。窗口的 background_color 在 tauri.conf.json 里
+            // 设成了与动画一致的深色，所以即使页面尚未渲染出来，用户看到的也是
+            // 一块深色底，不会是一块白板、更不会「毫无反应」。
+            //
+            // 前两版都在这一步上栽过：
+            //   v0.4.31 —— 立即 show() 但窗口没有背景色 → 白板
+            //   v0.4.32 —— 改成「等页面加载完成再显示」→ 更糟：WebView2 对隐藏
+            //              窗口的加载/渲染时机不受我们控制，动画会被一直扣住，
+            //              用户在整段等待里看不到任何反馈。
             if let Some(splash) = splash_window.as_ref() {
-                if !use_splash {
+                if use_splash {
+                    let _ = splash.show();
+                    let _ = splash.set_focus();
+                } else {
                     let _ = splash.close();
                 }
             }
+            Sidecar::append_log(
+                app.handle(),
+                &format!(
+                    "启动编排: use_splash={use_splash} auto_embed={auto_embed} hidden={hidden} splash_win={}",
+                    splash_window.is_some()
+                ),
+            );
 
             // 点击关闭 → 隐藏到托盘，而不是退出
             if let Some(window) = main_window.as_ref() {
