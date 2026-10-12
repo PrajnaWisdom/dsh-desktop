@@ -44,8 +44,12 @@ use crate::sidecar::Sidecar;
 
 /// 启动动画的最短展示时长：sidecar 秒起时也不至于一闪而过。
 const SPLASH_MIN_SHOW: Duration = Duration::from_millis(900);
-/// DSH 页面文档加载完成后额外等待的时间，让首屏渲染完再露出窗口（避免白屏一闪）。
-const PRESENT_DELAY: Duration = Duration::from_millis(180);
+/// 「显示主窗口」与「收起启动动画」之间的间隔。
+///
+/// 顺序上必须**先显示主窗口、再收起动画**：主窗口此时还在动画（alwaysOnTop）
+/// 后面，可以安静地把首屏渲染完，动画一收就是成品画面。
+/// 反过来（先关动画再显示窗口）中间会露出尚未渲染完的主窗口——「闪一下」就是这么来的。
+const SPLASH_HANDOFF_DELAY: Duration = Duration::from_millis(300);
 
 fn default_true() -> bool {
     true
@@ -143,11 +147,10 @@ fn splash_ready(app: AppHandle) -> Option<SplashStatus> {
     gate.last.lock().ok().and_then(|last| last.clone())
 }
 
-/// 收起启动动画并按需显示主窗口。幂等：只有第一次调用生效。
+/// 呈递主窗口并收起启动动画。幂等：只有第一次调用生效。
 ///
 /// 必须等 `on_page_load` 收到 DSH 页面的加载完成事件再调用——`navigate()` 是
-/// 异步的，导航之后立刻 `show()` 会先把仍停在占位页（本地控制台页）的画面露出来，
-/// 也就是「控制台页一闪」的来源。
+/// 异步的，导航之后立刻 `show()` 会先把仍停在占位页（本地控制台页）的画面露出来。
 fn present_main(app: &AppHandle) {
     let Some(state) = app.try_state::<Presentation>() else {
         return;
@@ -155,17 +158,27 @@ fn present_main(app: &AppHandle) {
     if state.done.swap(true, Ordering::SeqCst) {
         return;
     }
-    if let Some(splash) = app.get_webview_window("splash") {
-        let _ = splash.close();
+
+    // 1) 先显示主窗口。它此时被启动动画（alwaysOnTop）盖着，
+    //    用户看不到中间态，正好利用这段时间把首屏渲染完。
+    if state.allow_show {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
     }
-    if !state.allow_show {
-        return;
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+
+    // 2) 再收起启动动画。有动画时才延后——没有动画的路径没必要多等。
+    let app = app.clone();
+    thread::spawn(move || {
+        if app.get_webview_window("splash").is_some() {
+            thread::sleep(SPLASH_HANDOFF_DELAY);
+        }
+        if let Some(splash) = app.get_webview_window("splash") {
+            let _ = splash.close();
+        }
+    });
 }
 
 /// 就绪后进入 DSH：导航主窗口（此时仍隐藏），由 `on_page_load` 负责收尾呈现。
@@ -519,9 +532,19 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
-        // 启动动画窗口无需记忆尺寸/位置，且它每次都会居中，排除在窗口状态之外。
+        // 启动动画窗口无需记忆尺寸/位置（它每次居中），排除在窗口状态之外。
+        //
+        // 另外**只恢复几何信息，不恢复 visible**：窗口可见性由本应用自己接管
+        // （启动时隐藏、关闭即隐藏到托盘）。若让插件按上次退出时的状态恢复
+        // `visible`，主窗口会在 setup 把它 hide() 之前先露一下——用户看到的
+        // 就是「启动动画之前闪一下控制台页」。decorated / fullscreen 同理不需要。
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
                 .with_denylist(&["splash"])
                 .build(),
         )
@@ -574,12 +597,9 @@ pub fn run() {
             if !payload.url().as_str().starts_with(EMBED_URL) {
                 return;
             }
-            // 文档加载完成 ≠ 首屏渲染完成，稍等一拍再露出，避免白屏一闪。
-            let app = window.app_handle().clone();
-            thread::spawn(move || {
-                thread::sleep(PRESENT_DELAY);
-                present_main(&app);
-            });
+            // 交给 present_main：它先显示主窗口（躲在启动动画后面完成首屏渲染），
+            // 再收起动画，避免中间露出尚未渲染完的画面。
+            present_main(window.app_handle());
         })
         .setup(move |app| {
             let settings = load_settings(app.handle());
