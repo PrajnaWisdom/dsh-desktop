@@ -69,7 +69,7 @@ pub fn state() -> WatchdogState {
 /// 看门狗句柄：持有 Job Object，Drop 时释放（按 `kill_on_job_close` 决定是否连带杀进程）。
 #[cfg(windows)]
 pub struct Watchdog {
-    handle: windows::Win32::System::JobObjects::HANDLE,
+    handle: windows::Win32::Foundation::HANDLE,
     quota: Quota,
 }
 
@@ -87,8 +87,7 @@ impl Watchdog {
         {
             use windows::Win32::Foundation::CloseHandle;
             use windows::Win32::System::JobObjects::{
-                CreateJobObjectW, JobObjectExtendedLimitInformation,
-                SetInformationJobObject, JOBOBJECTINFOCLASS,
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
                 JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             };
