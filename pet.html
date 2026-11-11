@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DSH Pet</title>
+    <link rel="stylesheet" href="/src/pet.css" />
+  </head>
+  <body>
+    <div id="pet-root">
+      <!-- Three.js 渲染的 3D 机器人在此画布中 -->
+      <canvas id="pet-canvas"></canvas>
+
+      <!-- 顶部控制条：新建会话 -->
+      <div id="pet-toolbar">
+        <button id="btn-new-session" class="pet-chip" title="新建一个 DeepSeek Harness 会话">
+          <span class="chip-dot"></span>新会话
+        </button>
+      </div>
+
+      <!-- 说话气泡 -->
+      <div id="pet-bubble" class="pet-bubble hidden">
+        <div id="pet-bubble-text" class="pet-bubble-text"></div>
+        <div id="pet-bubble-status" class="pet-bubble-status"></div>
+      </div>
+
+      <!-- 输入区 -->
+      <div id="pet-input-bar">
+        <input id="pet-input" type="text" placeholder="对机器人说点什么…" autocomplete="off" />
+        <button id="btn-send" title="发送">↑</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/pet.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,41 @@
+name: CI Check
+
+# 轻量编译检查：分支/PR 推送时快速验证 Rust 与前端能否编译，
+# 不打包安装包（完整构建见 build-windows.yml，由 tag 触发）。
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npm run typecheck
+
+      - name: Frontend build (vite)
+        run: npm run build
+
+      - name: Rust check (cargo check --lib)
+        run: cargo check --lib
+        working-directory: src-tauri

@@ -33,6 +33,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::watchdog::{Watchdog, Quota};
+
 /// 去掉 Windows verbatim 前缀（`\\?\` / `\\?\UNC\`），返回普通路径。
 /// Tauri 的 `resource_dir()` 在 Windows 上可能返回 verbatim 路径，
 /// Node.js 22.20+ 无法把这种路径解析为主模块（见 nodejs/node#60435）。
@@ -183,6 +185,8 @@ pub struct SidecarInner {
     generation: AtomicU64,
     /// 运行日志（带轮转）；sidecar 的 stderr 与桌面侧诊断都写这里。
     log: Mutex<LogWriter>,
+    /// 资源看门狗：把 harness 进程树圈进 Job Object，限内存/进程数，超限 kill。
+    watchdog: Mutex<Option<Watchdog>>,
 }
 
 /// 由 `tauri::State` 持有（Send + Sync）。
@@ -202,6 +206,7 @@ impl Sidecar {
             last_restart_at: Mutex::new(None),
             generation: AtomicU64::new(0),
             log: Mutex::new(LogWriter::new()),
+            watchdog: Mutex::new(None),
         }))
     }
 
@@ -489,9 +494,38 @@ impl Sidecar {
             cmd.creation_flags(0x0800_0000);
         }
         let mut child = cmd.spawn().map_err(|e| format!("启动内置 DSH 失败: {e}"))?;
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or("无法获取 sidecar stdin")?;
         let stdout = child.stdout.take().ok_or("无法获取 sidecar stdout")?;
         let stderr = child.stderr.take().ok_or("无法获取 sidecar stderr")?;
+
+        // 把 harness 进程树圈进 Job Object：限内存 + 子进程数，超限内核直接
+        // 终止，绝不拖垮整机。watchdog 创建失败时降级为无配额（记录日志），
+        // 不影响 sidecar 正常启动。
+        {
+            let mut wd = self.0.watchdog.lock().unwrap();
+            let watchdog = match wd.take() {
+                Some(w) => w, // 复用上次的 Job Object
+                None => match Watchdog::new(Quota::default()) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        eprintln!("[sidecar] 资源看门狗创建失败，降级为无配额: {e}");
+                        *wd = None;
+                        None
+                    }
+                },
+            };
+            if let Some(w) = watchdog {
+                match w.assign_process(pid) {
+                    Ok(()) => *wd = Some(w),
+                    Err(e) => {
+                        // assign 失败也把 watchdog 放回（其配额仍可用于后续重启的进程）
+                        eprintln!("[sidecar] 将 harness 纳入看门狗失败（降级为无配额）: {e}");
+                        *wd = Some(w);
+                    }
+                }
+            }
+        }
 
         *self.0.child.lock().unwrap() = Some(child);
         *self.0.writer.lock().unwrap() = Some(stdin);

@@ -37,6 +37,22 @@
         "shadow": true,
         "backgroundColor": "#0b1020",
         "visible": false
+      },
+      {
+        "label": "pet",
+        "title": "DSH Pet",
+        "url": "pet.html",
+        "width": 360,
+        "height": 460,
+        "transparent": true,
+        "decorations": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "visible": false
       }
     ],
     "security": {

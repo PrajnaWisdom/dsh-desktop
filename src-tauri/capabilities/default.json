@@ -26,5 +26,16 @@
     "permissions": [
       "core:default"
     ]
+  },
+  {
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "pet",
+    "description": "3D 桌面宠物窗口：调用 dsh_rpc/dsh_subscribe/dsh_unsubscribe 驱动内置 DSH 会话",
+    "windows": ["pet"],
+    "permissions": [
+      "core:default",
+      "core:event:default",
+      "core:window:allow-start-dragging"
+    ]
   }
 ]

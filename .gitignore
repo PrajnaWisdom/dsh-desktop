@@ -30,3 +30,7 @@ src-tauri/icons/ios
 # Route C 本地测试与缓存
 .test-home/
 .npm-cache/
+
+# 本地工具与工作区缓存
+.qoder/
+.workbuddy/

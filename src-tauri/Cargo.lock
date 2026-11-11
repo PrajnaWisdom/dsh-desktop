@@ -872,6 +872,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
+ "windows",
 ]
 
 [[package]]

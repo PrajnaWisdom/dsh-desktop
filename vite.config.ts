@@ -38,6 +38,8 @@ export default defineConfig({
         main: entry("./index.html"),
         // 启动动画：由独立的 splash 窗口加载
         splash: entry("./splash.html"),
+        // 3D 桌面宠物：独立的透明窗口
+        pet: entry("./pet.html"),
       },
     },
   },

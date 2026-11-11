@@ -18,6 +18,7 @@
 mod bridge;
 mod notify;
 mod sidecar;
+mod watchdog;
 
 use std::{
     path::PathBuf,
@@ -409,6 +410,28 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+/// 切换 3D 桌面宠物窗口的显示/隐藏。
+///
+/// 宠物窗口默认隐藏（tauri.conf.json 里 visible=false），用户通过托盘菜单
+/// 或快捷键手动唤起。宠物复用内置 DSH 的桥接命令驱动会话，因此它自己
+/// 无需额外的进程/资源治理——DSH 已纳入 Job Object 看门狗。
+#[tauri::command]
+fn toggle_pet(app: AppHandle) -> bool {
+    let Some(pet) = app.get_webview_window("pet") else {
+        return false;
+    };
+    let now_visible = if pet.is_visible().unwrap_or(false) {
+        let _ = pet.hide();
+        false
+    } else {
+        let _ = pet.show();
+        let _ = pet.set_focus();
+        true
+    };
+    Sidecar::append_log(&app, &format!("宠物窗口已{}", if now_visible { "显示" } else { "隐藏" }));
+    now_visible
+}
+
 // ---------- 托盘 ----------
 
 /// 托盘菜单：状态 / 查看日志 / 开机自启动 / 退出。
@@ -419,6 +442,7 @@ fn quit_app(app: AppHandle) {
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let status_item = MenuItem::with_id(app, "status", "状态：检测中", true, None::<&str>)?;
     let logs_item = MenuItem::with_id(app, "logs", "查看日志", true, None::<&str>)?;
+    let pet_item = MenuItem::with_id(app, "pet", "桌面宠物", true, None::<&str>)?;
     let autostart_item =
         CheckMenuItem::with_id(app, "autostart", "开机自启动", true, false, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -427,6 +451,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         app,
         &[
             &status_item,
+            &PredefinedMenuItem::separator(app)?,
+            &pet_item,
             &PredefinedMenuItem::separator(app)?,
             &logs_item,
             &PredefinedMenuItem::separator(app)?,
@@ -449,6 +475,9 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "logs" => {
                 let _ = open_log(app);
+            }
+            "pet" => {
+                let _ = toggle_pet(app.clone());
             }
             "autostart" => {
                 let app = app.clone();
@@ -603,6 +632,8 @@ pub fn run() {
             splash_ready,
             splash_retry,
             quit_app,
+            // 3D 桌面宠物
+            toggle_pet,
             // 桥接命令（bridge-client.js 使用）
             bridge::dsh_rpc,
             bridge::dsh_cancel,
