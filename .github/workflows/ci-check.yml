@@ -37,5 +37,17 @@ jobs:
         run: npm run build
 
       - name: Rust check (cargo check --lib)
-        run: cargo check --lib
+        id: rust-check
+        shell: pwsh
+        run: |
+          cargo check --lib 2>&1 | Tee-Object -FilePath cargo-check.log
+          exit $LASTEXITCODE
         working-directory: src-tauri
+
+      - name: Upload cargo check log (on failure)
+        if: failure() && steps.rust-check.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-check-log
+          path: src-tauri/cargo-check.log
+          retention-days: 7
