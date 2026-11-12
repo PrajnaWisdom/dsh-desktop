@@ -741,6 +741,13 @@ pub fn run() {
                 });
             }
 
+            // 3D 桌面宠物：启动即显示（用户诉求是「默认就显示」，无需手动点托盘）。
+            // 宠物窗口透明无边框、置顶，复用内置 DSH 桥接驱动会话。
+            if let Some(pet) = app.get_webview_window("pet") {
+                let _ = pet.show();
+                Sidecar::append_log(app.handle(), "桌面宠物已默认显示");
+            }
+
             setup_tray(app.handle())?;
 
             // 自动启动内置 DSH sidecar（默认开启）
