@@ -44,6 +44,22 @@ jobs:
           exit $LASTEXITCODE
         working-directory: src-tauri
 
+      - name: Surface cargo errors as annotations
+        if: failure() && steps.rust-check.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $log = Get-Content -Path cargo-check.log -Raw -ErrorAction SilentlyContinue
+          if ($log) {
+            $lines = $log -split "`n"
+            foreach ($line in $lines) {
+              $t = $line.Trim()
+              if ($t -match '^error') {
+                Write-Host "::error::$($t)"
+              }
+            }
+          }
+        working-directory: src-tauri
+
       - name: Upload cargo check log (on failure)
         if: failure() && steps.rust-check.outcome == 'failure'
         uses: actions/upload-artifact@v4
