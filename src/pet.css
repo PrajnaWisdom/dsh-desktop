@@ -72,12 +72,12 @@ body {
   left: 50%;
   top: 30px;
   transform: translateX(-50%);
-  max-width: 300px;
-  min-width: 120px;
+  max-width: 200px;
+  min-width: 100px;
   background: rgba(18, 26, 46, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 14px;
-  padding: 12px 16px;
+  padding: 10px 14px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(8px);
   z-index: 20;
@@ -98,17 +98,17 @@ body {
 
 .pet-bubble-text {
   color: #e6ecf7;
-  font-size: 13.5px;
-  line-height: 1.55;
+  font-size: 12.5px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 220px;
+  max-height: 160px;
   overflow-y: auto;
 }
 
 .pet-bubble-status {
-  margin-top: 8px;
-  font-size: 11px;
+  margin-top: 6px;
+  font-size: 10.5px;
   color: #93a1bd;
   display: flex;
   align-items: center;
@@ -138,20 +138,20 @@ body {
 #pet-input-bar {
   position: absolute;
   left: 50%;
-  bottom: 18px;
+  bottom: 14px;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   background: rgba(18, 26, 46, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 999px;
-  padding: 6px 6px 6px 16px;
+  padding: 5px 5px 5px 14px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(8px);
   z-index: 20;
   -webkit-app-region: no-drag;
-  width: 300px;
+  width: 210px;
 }
 
 #pet-input {
@@ -160,7 +160,7 @@ body {
   border: none;
   outline: none;
   color: #e6ecf7;
-  font-size: 13.5px;
+  font-size: 12.5px;
   font-family: inherit;
   min-width: 0;
 }
@@ -171,13 +171,13 @@ body {
 
 #btn-send {
   appearance: none;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   border: none;
   background: linear-gradient(180deg, #0ea5b7, #0891b2);
   color: #fff;
-  font-size: 16px;
+  font-size: 14px;
   cursor: pointer;
   display: flex;
   align-items: center;

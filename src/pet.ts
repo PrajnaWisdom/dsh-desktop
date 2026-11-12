@@ -27,8 +27,18 @@ interface RpcResult {
   body_b64: string;
 }
 
-interface SessionCreateResult {
-  result: { value: { sessionId: string } };
+// DSH 连接层 RPC 响应信封（dsh-client-connection 的 ServerResponse）。
+// 注意：result 是 { ok:true, value } | { ok:false, error }，业务失败时
+// result.value 为 undefined、result.error 携带错误信息。
+interface ServerResponse<T = unknown> {
+  type: "server-response";
+  rpcId: string;
+  result: { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
+}
+
+interface SessionCreateValue {
+  sessionId: string;
+  agentPreset?: string;
 }
 
 interface DshFrameEvent {
@@ -36,19 +46,21 @@ interface DshFrameEvent {
   frame: unknown;
 }
 
-// $events 下行流里的一条 wire record（DSH session controller 协议）。
-interface WireRecord {
-  event?: {
-    type?: string;
-    data?: unknown;
-  };
-  type?: string;
-  args?: unknown;
+// $events 下行流里的一条帧。gateway 的 RemoteEvents.deliver 按
+// { type:'emit', event:'<事件名>', args:[<事件data>] } 分发（见
+// dsh-api-gateway remote-events.js），事件名如 "assistant/message"。
+interface RemoteEventFrame {
+  type?: "ready" | "emit" | "waterfall" | "cancel";
+  event?: string;
+  args?: unknown[];
 }
 
-interface AssistantMessage {
-  role?: string;
-  content?: ContentBlock[];
+// SessionEventMap['assistant/message'] 的事件 data：
+// { turn, step, message: AssistantMessage, stream, usage?, interrupted? }
+interface AssistantMessageEvent {
+  turn?: number;
+  step?: number;
+  message?: { role?: string; content?: ContentBlock[] };
 }
 
 interface ContentBlock {
@@ -98,21 +110,17 @@ function hideBubble(): void {
   bubbleStatus.textContent = "";
 }
 
-/** 从 $events 帧里提取 assistant 文本增量。返回提取到的文本（可能为空）。 */
-function extractText(frame: WireRecord): string {
-  // 兼容两种帧形态：{event:{type,data}} 或 {event, args}
-  const event = frame?.event ?? (frame?.args as WireRecord | undefined) ?? frame;
-  const type = (event as { type?: string }).type;
-  if (type !== "assistant/message") return "";
-
-  const data = (event as { data?: unknown }).data as
-    | { message?: AssistantMessage }
-    | AssistantMessage
-    | undefined;
-  const message: AssistantMessage | undefined =
-    data && "message" in (data as object) ? (data as { message?: AssistantMessage }).message : (data as AssistantMessage);
-
-  const content = Array.isArray(message?.content) ? message!.content! : [];
+/**
+ * 从 $events 帧里提取 assistant 文本增量。返回提取到的文本（可能为空）。
+ *
+ * 帧形态（gateway RemoteEvents.deliver）：{ type:'emit', event:'assistant/message', args:[{ message:{content} }] }。
+ * assistant/message 事件的 data 是 { turn, step, message, stream }，
+ * 文本块在 message.content 里。
+ */
+function extractText(frame: RemoteEventFrame): string {
+  if (frame?.type !== "emit" || frame.event !== "assistant/message") return "";
+  const data = frame.args?.[0] as AssistantMessageEvent | undefined;
+  const content = Array.isArray(data?.message?.content) ? data!.message!.content : [];
   let text = "";
   for (const block of content) {
     if (block?.type === "text" && typeof block.text === "string") {
@@ -124,13 +132,23 @@ function extractText(frame: WireRecord): string {
 
 // ---------- DSH RPC ----------
 
-/** 发一次 DSH RPC 请求，返回解码后的 JSON 结果。 */
-async function dshRpc<T>(method: string, payload: unknown): Promise<T> {
+/**
+ * 发一次 DSH RPC 请求，返回解包后的 result.value。
+ *
+ * DSH 连接层的线协议（dsh-client-connection）：
+ *  - 请求 body：{ type:"client-request", rpcId, method, payload }
+ *  - 请求 URL：POST /api/{namespace}/{method}（如 /api/session/create）
+ *  - payload 结构：{ args: { <参数wire名>: <参数值> } }
+ *    （gateway 层在 args 里按参数 wire 名打包，session-controller 的
+ *    方法参数 wire 名统一是 "request"，故 payload = { args: { request } }）
+ *  - 响应 body：{ type:"server-response", rpcId, result:{ok,value|error} }
+ */
+async function dshRpc<T>(method: string, requestArgs: unknown): Promise<T> {
   const body = JSON.stringify({
     type: "client-request",
     rpcId: crypto.randomUUID(),
     method,
-    payload,
+    payload: { args: { request: requestArgs } },
   });
   const result = await invoke<RpcResult>("dsh_rpc", {
     id: crypto.randomUUID(),
@@ -142,18 +160,23 @@ async function dshRpc<T>(method: string, payload: unknown): Promise<T> {
   if (result.status !== 200) {
     throw new Error(`DSH ${method} 失败 (HTTP ${result.status}): ${b64ToUtf8(result.body_b64)}`);
   }
-  return JSON.parse(b64ToUtf8(result.body_b64)) as T;
+  const envelope = JSON.parse(b64ToUtf8(result.body_b64)) as ServerResponse<T>;
+  if (!envelope.result.ok) {
+    throw new Error(`DSH ${method} 业务失败: ${envelope.result.error.message} (${envelope.result.error.code})`);
+  }
+  return envelope.result.value;
 }
 
 /** 新建一个会话，返回 sessionId。 */
 async function createSession(): Promise<string> {
-  const res = await dshRpc<SessionCreateResult>("session/create", {});
-  return res.result.value.sessionId;
+  const value = await dshRpc<SessionCreateValue>("session/create", {});
+  return value.sessionId;
 }
 
 /** 向会话发一条用户消息（queue 模式）。 */
 async function promptSession(sid: string, text: string): Promise<void> {
   await dshRpc<unknown>("session/prompt", {
+    requestId: crypto.randomUUID(),
     sessionId: sid,
     mode: "queue",
     content: [{ type: "text", text }],
@@ -202,7 +225,7 @@ async function send(text: string): Promise<void> {
     // 记录当前监听器，后续流结束/超时时清理
     const frameUnlisten = await listen<DshFrameEvent>("dsh-frame", (ev) => {
       if (ev.payload.subId !== EVENTS_SUB_ID) return;
-      const frame = ev.payload.frame as WireRecord;
+      const frame = ev.payload.frame as RemoteEventFrame;
       const text = extractText(frame);
       if (text) {
         reply += text;
@@ -254,9 +277,8 @@ async function waitForReplyEnd(
     // 额外监听 turn/end
     void listen<DshFrameEvent>("dsh-frame", (ev) => {
       if (ev.payload.subId !== EVENTS_SUB_ID) return;
-      const frame = ev.payload.frame as WireRecord;
-      const type = (frame?.event as { type?: string })?.type ?? frame?.type;
-      if (type === "turn/end") finish();
+      const frame = ev.payload.frame as RemoteEventFrame;
+      if (frame?.type === "emit" && frame.event === "turn/end") finish();
     }).then((unlisten) => {
       // 兜底超时
       setTimeout(() => {
@@ -296,8 +318,8 @@ function initRobot(): void {
     0.1,
     100,
   );
-  camera.position.set(0, 0.4, 4.2);
-  camera.lookAt(0, 0.1, 0);
+  camera.position.set(0, 0.3, 5.6);
+  camera.lookAt(0, 0.0, 0);
 
   // 灯光
   const key = new THREE.DirectionalLight(0xffffff, 1.4);
