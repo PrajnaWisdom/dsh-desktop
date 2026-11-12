@@ -73,6 +73,14 @@ pub struct Watchdog {
     quota: Quota,
 }
 
+// HANDLE 是 `*mut c_void` 的 newtype，默认 !Send + !Sync。但 Windows 内核句柄
+// 本质是进程内共享的不可变标识，跨线程读写是安全的（与 tauri 内部处理窗口/
+// 事件句柄同义）。SidecarInner 经 Arc 在多线程间共享，因此需要显式声明。
+#[cfg(windows)]
+unsafe impl Send for Watchdog {}
+#[cfg(windows)]
+unsafe impl Sync for Watchdog {}
+
 #[cfg(not(windows))]
 pub struct Watchdog {
     quota: Quota,
