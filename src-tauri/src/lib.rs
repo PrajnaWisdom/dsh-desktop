@@ -432,6 +432,73 @@ fn toggle_pet(app: AppHandle) -> bool {
     now_visible
 }
 
+/// 设置桌面宠物窗口的鼠标命中区域（点击透传）。
+///
+/// 前端把可交互元素（输入框、发送按钮、新会话按钮、说话气泡等）的包围盒
+/// 以**逻辑像素**上报，这里转成物理像素后用 `SetWindowRgn` 定义窗口命中区：
+/// 命中区内的鼠标事件才派发给宠物窗口，命中区外（机器人 3D 主体、透明空白）
+/// 自动穿透到下层窗口——即「交互区不透传、主体透传」。
+///
+/// `rects` 为空数组表示整窗可交互（清除区域）。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_pet_region(app: AppHandle, rects: Vec<(f64, f64, f64, f64)>) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, HRGN, RGN_OR,
+    };
+
+    let Some(pet) = app.get_webview_window("pet") else {
+        return Err("找不到宠物窗口".into());
+    };
+    let hwnd: HWND = pet.hwnd().map_err(|e| e.to_string())?;
+
+    let scale = pet.scale_factor().map_err(|e| e.to_string())?;
+
+    if rects.is_empty() {
+        // 清除区域 → 整窗可交互
+        let _ = unsafe { SetWindowRgn(hwnd, None, true) };
+        return Ok(());
+    }
+
+    // 合并所有交互矩形为单个 HRGN
+    let mut combined: Option<HRGN> = None;
+    for (l, t, r, b) in rects {
+        let region = unsafe {
+            CreateRectRgn(
+                (l * scale) as i32,
+                (t * scale) as i32,
+                (r * scale) as i32,
+                (b * scale) as i32,
+            )
+        };
+        combined = match combined {
+            None => Some(region),
+            Some(existing) => {
+                let _ = unsafe { CombineRgn(Some(existing), Some(existing), Some(region), RGN_OR) };
+                // region 已并入 existing，可释放
+                let _ = unsafe { DeleteObject(region.into()) };
+                Some(existing)
+            }
+        };
+    }
+
+    match combined {
+        Some(region) => {
+            // SetWindowRgn 成功后系统接管 region 所有权，这里不释放
+            let _ = unsafe { SetWindowRgn(hwnd, Some(region), true) };
+            Ok(())
+        }
+        None => Err("交互区为空".into()),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn set_pet_region(_app: AppHandle, _rects: Vec<(f64, f64, f64, f64)>) -> Result<(), String> {
+    Ok(())
+}
+
 // ---------- 托盘 ----------
 
 /// 托盘菜单：状态 / 查看日志 / 开机自启动 / 退出。
@@ -634,6 +701,7 @@ pub fn run() {
             quit_app,
             // 3D 桌面宠物
             toggle_pet,
+            set_pet_region,
             // 桥接命令（bridge-client.js 使用）
             bridge::dsh_rpc,
             bridge::dsh_cancel,

@@ -102,12 +102,14 @@ function setBubble(text: string, status?: string): void {
     bubbleStatus.textContent = status;
   }
   bubble.classList.remove("hidden");
+  updatePetRegion();
 }
 
 function hideBubble(): void {
   bubble.classList.add("hidden");
   bubbleText.textContent = "";
   bubbleStatus.textContent = "";
+  updatePetRegion();
 }
 
 /**
@@ -318,8 +320,50 @@ function initRobot(): void {
     0.1,
     100,
   );
-  camera.position.set(0, 0.3, 5.6);
-  camera.lookAt(0, 0.0, 0);
+
+  // 视角：球面坐标绕机器人中心旋转。theta=水平角，phi=俯仰角。
+  // 用户鼠标拖拽机器人区域可旋转观察角度。
+  let theta = 0; // 水平旋转角（弧度）
+  let phi = 0.35; // 初始俯仰角（略俯视）
+  const radius = 5.6;
+  const target = new THREE.Vector3(0, 0, 0);
+
+  function updateCamera(): void {
+    camera.position.set(
+      target.x + radius * Math.sin(theta) * Math.cos(phi),
+      target.y + radius * Math.sin(phi),
+      target.z + radius * Math.cos(theta) * Math.cos(phi),
+    );
+    camera.lookAt(target);
+  }
+  updateCamera();
+
+  // 鼠标拖拽旋转（在机器人区域按下拖动）
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  canvas.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    theta -= dx * 0.01;
+    phi = Math.max(-1.2, Math.min(1.2, phi - dy * 0.01));
+    updateCamera();
+  });
+  canvas.addEventListener("pointerup", () => {
+    dragging = false;
+  });
+  canvas.addEventListener("pointercancel", () => {
+    dragging = false;
+  });
 
   // 灯光
   const key = new THREE.DirectionalLight(0xffffff, 1.4);
@@ -434,6 +478,7 @@ function initRobot(): void {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
+    updatePetRegion();
   });
 }
 
@@ -445,9 +490,46 @@ input.addEventListener("keydown", (e) => {
 });
 btnNew.addEventListener("click", () => void newSession());
 
+// ---------- 鼠标命中区域（点击透传） ----------
+
+// 把可交互元素（输入框/按钮/气泡）与机器人主体区域的包围盒上报给 Rust，
+// 由 SetWindowRgn 定义窗口命中区：命中区内的鼠标事件派发给宠物窗口
+// （可拖拽旋转、可点按钮、可输入），命中区外的透明空白自动穿透到下层窗口。
+function updatePetRegion(): void {
+  const interactiveIds = ["pet-input-bar", "pet-toolbar"];
+  const rects: [number, number, number, number][] = [];
+
+  // 交互元素
+  for (const id of interactiveIds) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    rects.push([r.left, r.top, r.right, r.bottom]);
+  }
+  // 说话气泡（动态显示）
+  const bubbleEl = document.getElementById("pet-bubble");
+  if (bubbleEl && !bubbleEl.classList.contains("hidden")) {
+    const r = bubbleEl.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) rects.push([r.left, r.top, r.right, r.bottom]);
+  }
+
+  // 机器人主体区域：canvas 中央的矩形（机器人 3D 渲染区，用于拖拽旋转）。
+  // 覆盖 canvas 绝大部分，仅在四周留出透明边距用于穿透。
+  const canvas = $<HTMLCanvasElement>("pet-canvas");
+  const cr = canvas.getBoundingClientRect();
+  const pad = 12; // 四周留白，让窗口边缘透明区域可穿透
+  rects.push([cr.left + pad, cr.top + pad, cr.right - pad, cr.bottom - pad]);
+
+  void invoke("set_pet_region", { rects }).catch((e) => {
+    console.warn("set_pet_region 失败:", e);
+  });
+}
+
 // ---------- 初始化 ----------
 
 initRobot();
+updatePetRegion();
 void ensureSession().then((sid) => {
   if (sid) {
     setBubble("嗨，我是你的 DeepSeek Harness 助手 🤖\n有什么想聊的？", "会话已续接");
