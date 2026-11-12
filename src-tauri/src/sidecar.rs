@@ -505,12 +505,11 @@ impl Sidecar {
         {
             let mut wd = self.0.watchdog.lock().unwrap();
             let watchdog = match wd.take() {
-                Some(w) => w, // 复用上次的 Job Object
+                Some(w) => Some(w), // 复用上次的 Job Object
                 None => match Watchdog::new(Quota::default()) {
-                    Ok(w) => w,
+                    Ok(w) => Some(w),
                     Err(e) => {
                         eprintln!("[sidecar] 资源看门狗创建失败，降级为无配额: {e}");
-                        *wd = None;
                         None
                     }
                 },
