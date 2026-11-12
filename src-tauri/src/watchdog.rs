@@ -111,7 +111,7 @@ impl Watchdog {
                     ext_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 }
                 ext_limit.ProcessMemoryLimit = (quota.memory_mb * 1024 * 1024) as usize;
-                ext_limit.ActiveProcessLimit = quota.max_processes;
+                ext_limit.BasicLimitInformation.ActiveProcessLimit = quota.max_processes;
 
                 let res = SetInformationJobObject(
                     handle,
